@@ -1,0 +1,60 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# IDE state
+/.idea/
+.kotlin/
+.nano/
+
+# secrets
+debug.keystore
+
+# backups
+*.bak
+*.backup
+/app/src/main_backup_encoding/
+
+# toolchain & build work dirs (binaries, re-downloadable)
+/cmake-*/
+/cmake-build-work/
+/d8-work/
+/kotlin-compiler/
+/kotlinc-dex-out/
+/ndk-*/
+
+# upstream clones (re-clonable, build inputs only)
+/llama.cpp/
+/Vulkan-Headers/
+/SPIRV-Headers/
+
+# loose working artifacts at repo root
+/HowToUseAI.txt
+/mb.txt
+/javac-debug.txt
+/fix1a.js
+/temp_fix*.py
+/tmp_layoutlib_runtime*.jar
+/append_helpers.kt
+/AaptVisitor*.txt
+/AndroidGradleCachePatcher*
+/GradleExecVisitor*.txt
+/JdkToolVisitor*.txt
+/NativeMethodVisitor*.txt
+/NativeProcess*.txt
+/NativeVisitor-Full.txt
+/Patcher*.txt
+/ShellAapt*.txt
+/Visitor-*.txt
+local.properties
