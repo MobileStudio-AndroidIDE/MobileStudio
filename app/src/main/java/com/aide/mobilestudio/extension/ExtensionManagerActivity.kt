@@ -2,8 +2,10 @@ package com.aide.mobilestudio.extension
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -19,6 +21,9 @@ import android.widget.Toast
 import com.aide.mobilestudio.StudioUi
 import java.io.File
 
+private const val OFFICIAL_OWNER = "MobileStudio-AndroidIDE"
+private const val EXT_REPO = "MobileStudio-Extensions"
+
 /**
  * Extension Manager UI — Installed / Available / Updates tabs, search,
  * permission display, install/uninstall/enable/disable/update actions.
@@ -33,6 +38,9 @@ class ExtensionManagerActivity : Activity() {
     private var currentTab = 0 // 0=Installed 1=Available 2=Updates
     private var query = ""
     private var loginBtn: TextView? = null
+    private var translateBtn: TextView? = null
+    private var loginDialog: AlertDialog? = null
+    private var patField: EditText? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,16 +85,23 @@ class ExtensionManagerActivity : Activity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    /** Wraps a horizontal button row so actions past the screen edge stay reachable. */
+    private fun hScrollActions(row: LinearLayout): View =
+        HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(row, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
     private fun buildHeader() {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(StudioUi.palette.surface)
             setPadding(StudioUi.SpacingLg, dp(12), StudioUi.SpacingSm, dp(12))
+            // 가로 스크롤 뷰 안에서 내용 폭만큼만 차지해야 스크롤이 동작한다
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-        header.addView(headerText("Extensions", 17f, StudioUi.palette.text, true).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
+        header.addView(headerText("Extensions", 17f, StudioUi.palette.text, true))
         header.addView(textButton("Refresh") {
             Toast.makeText(this, "registry 새로고침 중…", Toast.LENGTH_SHORT).show()
             ExtensionManager.get(this).refreshRepo(force = true) { _, err ->
@@ -106,10 +121,25 @@ class ExtensionManagerActivity : Activity() {
         loginBtn = login
         header.addView(login)
         refreshLoginButton()
+        header.addView(textButton("기기에서 설치") { showLocalPackagesDialog() })
+        header.addView(textButton("Build .msext") { startBuildMsext() })
+        translateBtn = textButton(translateLabel()) { toggleAutoTranslate() }
+        header.addView(translateBtn)
         header.addView(textButton("Developer") { showDeveloperDialog() })
         header.addView(textButton("Error Log") { showErrorLog() })
         header.addView(textButton("Close") { finish() })
-        root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        // 버튼이 화면 폭을 넘어 잘리지 않도록 가로 스크롤로 감싼다.
+        // HorizontalScrollView는 FrameLayout이므로 layoutParams를 주지 않으면
+        // MATCH_PARENT가 되어 스크롤이 아예 동작하지 않는다 — 폭은 콘텐츠만큼만.
+        val headerScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(StudioUi.palette.surface)
+            addView(
+                header,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            )
+        }
+        root.addView(headerScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(StudioUi.thinDivider(this))
     }
 
@@ -118,6 +148,8 @@ class ExtensionManagerActivity : Activity() {
         val btn = loginBtn ?: return
         btn.text = when {
             ExtensionAccount.get(this).isLoggedIn() -> "My"
+            GitHubAuth.isLoggedIn(this) ->
+                "@" + GitHubAuth.login(this).ifBlank { "GitHub" }
             ExtensionServerClient.hasSession(this) ->
                 "@" + ExtensionServerClient.loginName(this).ifBlank { "GitHub" }
             else -> "Login"
@@ -127,6 +159,43 @@ class ExtensionManagerActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshLoginButton()
+        autofillTokenFromClipboard()
+    }
+
+    private fun translateLabel() =
+        if (ExtensionI18n.isEnabled(this)) "자동 번역 ON" else "자동 번역 OFF"
+
+    /** Extension metadata auto-translation: default ON, one tap to disable. */
+    private fun toggleAutoTranslate() {
+        val next = !ExtensionI18n.isEnabled(this)
+        ExtensionI18n.setEnabled(this, next)
+        translateBtn?.text = translateLabel()
+        Toast.makeText(
+            this,
+            if (next) "확장 이름/설명을 앱 언어로 자동 번역합니다" else "자동 번역을 끔 — 원문만 표시합니다",
+            Toast.LENGTH_SHORT
+        ).show()
+        refresh()
+    }
+
+    /** Localises extension metadata; a no-op for ko/en or when the toggle is off. */
+    private fun localize(text: String, languages: List<String>, dir: File?): String =
+        ExtensionI18n.localize(this, text, languages, dir)
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android 10+ 클립보드는 포커스 회복 후에만 읽을 수 있다
+        if (hasFocus) autofillTokenFromClipboard()
+    }
+
+    /** 브라우저에서 토큰을 복사하고 돌아오면 → 로그인 필드에 자동 채움한다. */
+    private fun autofillTokenFromClipboard() {
+        val field = patField
+        if (field == null || loginDialog?.isShowing != true || !field.text.isNullOrBlank()) return
+        GitHubAuth.clipToken(this)?.let { t ->
+            field.setText(t)
+            Toast.makeText(this, "클립보드의 GitHub 토큰을 붙여넣었습니다 — 로그인을 누르세요", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun buildSearch() {
@@ -155,7 +224,13 @@ class ExtensionManagerActivity : Activity() {
 
     private fun buildTabs() {
         tabRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(StudioUi.SpacingSm, 0, StudioUi.SpacingSm, 0) }
-        val scroller = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(tabRow) }
+        val scroller = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(
+                tabRow,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            )
+        }
         root.addView(scroller, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(StudioUi.thinDivider(this))
         refreshTabs()
@@ -220,8 +295,17 @@ class ExtensionManagerActivity : Activity() {
 
     private fun extensionCardInstalled(it: ExtensionManager.InstalledExtension): View {
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(StudioUi.SpacingLg, dp(12), StudioUi.SpacingLg, dp(12)) }
-        card.addView(titleRow(it.manifest.name, it.manifest.version, if (it.enabled) "Enabled" else "Disabled", if (it.enabled) StudioUi.palette.success else StudioUi.palette.textSoft))
-        if (it.manifest.description.isNotBlank()) card.addView(desc(it.manifest.description))
+        card.addView(
+            titleRow(
+                localize(it.manifest.name, it.manifest.languages, it.dir),
+                it.manifest.version,
+                if (it.enabled) "Enabled" else "Disabled",
+                if (it.enabled) StudioUi.palette.success else StudioUi.palette.textSoft
+            )
+        )
+        if (it.manifest.description.isNotBlank()) {
+            card.addView(desc(localize(it.manifest.description, it.manifest.languages, it.dir)))
+        }
         card.addView(permissionRow(it.manifest.permissions))
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
         actions.addView(textButton(if (it.enabled) "Disable" else "Enable") {
@@ -235,7 +319,7 @@ class ExtensionManagerActivity : Activity() {
             ExtensionBridge.notifyBannersChanged()
             refresh()
         })
-        card.addView(actions)
+        card.addView(hScrollActions(actions))
         if (it.enabled) {
             actions.addView(textButton("Publish") { publishInstalled(it) })
         }
@@ -243,36 +327,64 @@ class ExtensionManagerActivity : Activity() {
     }
 
     /** Packs the installed extension's project folder into .msext and publishes it.
-     *  Preferred path: server API with a browser-OAuth session (no token in the app).
-     *  Legacy fallback: direct GitHub upload with a PAT, if one is still configured. */
+     *  - GitHub account login (device flow): publishes a PUBLIC release to the
+     *    logged-in user's own account, and also uploads to the shared marketplace
+     *    server when a session exists.
+     *  - Server session only: uploads to the shared marketplace.
+     *  - Legacy PAT: direct upload to the official repository. */
     private fun publishInstalled(inst: ExtensionManager.InstalledExtension) {
+        val ghToken = GitHubAuth.token(this)
         val useServer = ExtensionServerClient.hasSession(this)
-        if (!useServer && !GitHubPublisher.hasToken(this)) {
-            Toast.makeText(this, "GitHub 로그인이 필요합니다 — Login에서 브라우저로 로그인하면 바로 업로드됩니다", Toast.LENGTH_LONG).show()
+        val hasPat = GitHubPublisher.hasToken(this)
+        if (ghToken == null && !useServer && !hasPat) {
+            Toast.makeText(this, "GitHub 로그인이 필요합니다 — 로그인 후 바로 업로드됩니다", Toast.LENGTH_LONG).show()
+            showLoginDialog()
+            return
+        }
+        if (ghToken != null && !GitHubAuth.canPublish(this)) {
+            Toast.makeText(this, "토큰에 ‘repo’ 권한이 없습니다 — 토큰을 다시 만들어 로그인하세요", Toast.LENGTH_LONG).show()
             showLoginDialog()
             return
         }
         Toast.makeText(this, "패키징 후 게시합니다…", Toast.LENGTH_SHORT).show()
         Thread {
             try {
-                val owner = "MobileStudio-AndroidIDE"
-                val repo = "MobileStudio-Extensions"
                 val packed = ExtensionManager.get(this).packMsext(inst.dir, File(cacheDir, "publish")) { msg ->
                     runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
                 } ?: run {
                     runOnUiThread { Toast.makeText(this, "패키징 실패", Toast.LENGTH_LONG).show() }
                     return@Thread
                 }
-                if (useServer) {
+                fun progress(p: String) = runOnUiThread { Toast.makeText(this, p, Toast.LENGTH_SHORT).show() }
+
+                if (ghToken != null) {
+                    val owner = GitHubAuth.login(this).ifBlank {
+                        runCatching { GitHubPublisher.whoAmI(this).message }.getOrDefault("")
+                    }
+                    if (owner.isBlank()) {
+                        runOnUiThread { Toast.makeText(this, "GitHub 계정 확인 실패 — 다시 로그인하세요", Toast.LENGTH_LONG).show() }
+                        return@Thread
+                    }
+                    GitHubPublisher.publishToUserRepo(this, owner, EXT_REPO, packed.first, packed.second, ::progress) { r ->
+                        runOnUiThread { Toast.makeText(this, "내 계정 게시: ${r.message}", Toast.LENGTH_LONG).show() }
+                    }
+                    if (useServer) {
+                        ExtensionServerClient.upload(this, packed.first, inst.manifest.id,
+                            onProgress = ::progress,
+                            onDone = { r -> runOnUiThread { Toast.makeText(this, "공용 마켓: ${r.message}", Toast.LENGTH_LONG).show() } })
+                    } else {
+
+                        runOnUiThread {
+                            Toast.makeText(this, "공용 마켓 게시는 서버 로그인이 필요합니다 (내 계정에는 게시됨)", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                } else if (useServer) {
                     ExtensionServerClient.upload(this, packed.first, inst.manifest.id,
-                        onProgress = { p -> runOnUiThread { Toast.makeText(this, p, Toast.LENGTH_SHORT).show() } },
+                        onProgress = ::progress,
                         onDone = { r -> runOnUiThread { Toast.makeText(this, r.message, Toast.LENGTH_LONG).show() } })
                 } else {
-                    GitHubPublisher.publishExtension(this, owner, repo, packed.first, packed.second,
-                        { msg -> runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() } }) { result ->
-                        runOnUiThread {
-                            Toast.makeText(this, result.message, Toast.LENGTH_LONG).show()
-                        }
+                    GitHubPublisher.publishExtension(this, OFFICIAL_OWNER, EXT_REPO, packed.first, packed.second, ::progress) { result ->
+                        runOnUiThread { Toast.makeText(this, result.message, Toast.LENGTH_LONG).show() }
                     }
                 }
             } catch (e: Exception) {
@@ -317,7 +429,15 @@ class ExtensionManagerActivity : Activity() {
             .setView(container)
             .setPositiveButton("등록") { _, _ ->
                 val token = tokenField.text.toString().trim()
-                if (token.isNotBlank()) GitHubPublisher.setToken(this, token)
+                if (token.isNotBlank()) {
+                    // 검증을 통과해야 세션(GitHubAuth) + 게시 자격증명(GitHubPublisher)이 저장된다
+                    GitHubAuth.loginWithToken(this, token) { ok, msg ->
+                        runOnUiThread {
+                            refreshLoginButton()
+                            if (!ok) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
                 DeveloperProfile.register(this, nameField.text.toString().trim(), emailField.text.toString().trim(), null) { ok, msg ->
                     runOnUiThread {
                         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
@@ -345,8 +465,8 @@ class ExtensionManagerActivity : Activity() {
     private fun extensionCardAvailable(entry: ExtensionManager.RepoEntry, inst: ExtensionManager.InstalledExtension?, installedIds: Set<String>): View {
         val marketplace = ExtensionMarketplace.get(this)
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(StudioUi.SpacingLg, dp(12), StudioUi.SpacingLg, dp(12)) }
-        card.addView(titleRow(entry.name, entry.version, if (inst != null) (if (inst.enabled) "Enabled" else "Disabled") else "", if (inst != null) (if (inst.enabled) StudioUi.palette.success else StudioUi.palette.textSoft) else StudioUi.palette.textSoft, entry.author.ifBlank { DeveloperProfile.get(this)?.name ?: "" }, DeveloperProfile.get(this)?.email ?: ""))
-        if (entry.description.isNotBlank()) card.addView(desc(entry.description))
+        card.addView(titleRow(localize(entry.name, entry.languages, inst?.dir), entry.version, if (inst != null) (if (inst.enabled) "Enabled" else "Disabled") else "", if (inst != null) (if (inst.enabled) StudioUi.palette.success else StudioUi.palette.textSoft) else StudioUi.palette.textSoft, entry.author.ifBlank { DeveloperProfile.get(this)?.name ?: "" }, DeveloperProfile.get(this)?.email ?: ""))
+        if (entry.description.isNotBlank()) card.addView(desc(localize(entry.description, entry.languages, inst?.dir)))
         card.addView(metaRow(entry))
         card.addView(permissionRow(entry.permissions))
         // 신고 누적/관리자 차단 → Extension Hub에 "Under review" 표시
@@ -382,11 +502,11 @@ class ExtensionManagerActivity : Activity() {
         actions.addView(textButton("Report") { showReportDialog(entry) })
         // 상세 정보
         actions.addView(textButton("Details") { showExtensionDetail(entry) })
-        card.addView(actions)
+        card.addView(hScrollActions(actions))
         return LinearLayout(this).apply { setPadding(dp(6), dp(6), dp(6), dp(6)); setBackgroundColor(Color.TRANSPARENT); addView(card); background = StudioUi.cardBg(this@ExtensionManagerActivity) }
     }
 
-    /** GitHub 로그인 — 브라우저 OAuth(권장, 토큰 미보관) + 선택적 직접 토큰(고급). */
+    /** GitHub 로그인 — PAT(기본, 서버 불필요) + Device Flow(고급) + Gmail. */
     private fun showLoginDialog() {
         val account = ExtensionAccount.get(this)
         val hasGoogle = ExtensionAccount.isGoogleSignInAvailable(this) && ExtensionAccount.clientId(this).isNotBlank()
@@ -397,72 +517,133 @@ class ExtensionManagerActivity : Activity() {
         }
         val profile = DeveloperProfile.get(this)
         val serverSession = ExtensionServerClient.hasSession(this)
-        val status = buildString {
+        val ghLoggedIn = GitHubAuth.isLoggedIn(this)
+        fun statusText(): String = buildString {
+            if (ghLoggedIn) {
+                val scope = GitHubAuth.scopes(this@ExtensionManagerActivity)
+                append("GitHub: ${GitHubAuth.login(this@ExtensionManagerActivity).ifBlank { "로그인됨" }} — 내 계정에 공개 게시")
+                if (scope.isNotBlank()) append("  [$scope]")
+                append("\n")
+                if (scope.isNotBlank() && !GitHubAuth.hasRepoScope(scope)) {
+                    append("⚠ ‘repo’ 권한이 없는 토큰입니다 — 게시에 실패할 수 있습니다\n")
+                }
+            }
             if (serverSession) {
                 val login = ExtensionServerClient.loginName(this@ExtensionManagerActivity).ifBlank { "로그인됨" }
-                append("GitHub (서버 세션): $login\n")
+                append("GitHub (서버 세션): $login — 공용 마켓\n")
             }
-            if (GitHubPublisher.hasToken(this@ExtensionManagerActivity)) append("GitHub (직접 토큰): 로그인됨\n")
+            if (!ghLoggedIn && GitHubPublisher.hasToken(this@ExtensionManagerActivity)) append("GitHub (직접 토큰): 로그인됨\n")
             if (account.isLoggedIn()) append("Gmail: ${account.current()?.displayName ?: "로그인됨"}\n")
             if (profile != null) append("개발자: ${profile.name}")
         }
-        container.addView(TextView(this).apply {
-            text = if (status.isBlank()) "로그인 상태 없음 — GitHub 로그인 버튼으로 브라우저 승인을 마치면 업로드가 바로 가능합니다" else status
+        val statusView = TextView(this).apply {
             textSize = 13f
             setTextColor(StudioUi.palette.textSoft)
+        }
+        fun renderStatus() {
+            val s = statusText()
+            statusView.text = if (s.isBlank()) {
+                "서버 없이 바로 로그인합니다.\n① 브라우저에서 토큰 만들기 → ② 복사 → ③ 앱으로 돌아와 로그인"
+            } else s
+        }
+        renderStatus()
+        container.addView(statusView)
+
+        // ① 브라우저에서 토큰 생성 (scope=repo 미리 선택됨)
+        container.addView(TextView(this).apply {
+            text = "① 브라우저에서 토큰 만들기  ▸"
+            textSize = 12f
+            setTextColor(StudioUi.palette.accent)
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setPadding(0, dp(10), 0, 0)
+            setOnClickListener { openTokenPage() }
         })
 
-        if (serverSession) {
-            container.addView(TextView(this).apply {
-                text = "▸ 세션 로그아웃"
-                textSize = 12f
-                setTextColor(StudioUi.palette.error)
-                setPadding(0, dp(8), 0, 0)
-                setOnClickListener {
-                    ExtensionServerClient.logout(this@ExtensionManagerActivity)
-                    Toast.makeText(this@ExtensionManagerActivity, "로그아웃되었습니다", Toast.LENGTH_SHORT).show()
-                    refreshLoginButton()
-                    dialog?.dismiss()
-                }
-            })
-        }
-
-        fun field(hint: String, initial: String = "") = EditText(this).apply {
-            this.hint = hint
+        // ② 붙여넣기 — 클립보드에 토큰이 있으면 미리 채워둔다
+        val tokenField = EditText(this).apply {
+            hint = "② 토큰 붙여넣기 (ghp_…)"
             setSingleLine(true)
             textSize = 13f
             setTextColor(StudioUi.palette.text)
             setHintTextColor(StudioUi.palette.textSoft)
             background = StudioUi.inputBg(this@ExtensionManagerActivity)
             setPadding(dp(10), dp(8), dp(10), dp(8))
-            setText(initial)
-        }
-
-        val tokenField = field(if (GitHubPublisher.hasToken(this)) "고급: 새 GitHub 직접 토큰 (변경 시에만 입력)" else "고급: GitHub 직접 토큰 (선택 — 미사용 권장)")
-        if (hasGoogle) {
-            container.addView(TextView(this).apply {
-                text = "Gmail 계정으로도 로그인할 수 있습니다"
-                textSize = 11f
-                setTextColor(StudioUi.palette.textSoft)
-                setPadding(0, dp(6), 0, 0)
-            })
+            GitHubAuth.clipToken(this@ExtensionManagerActivity)?.let { setText(it) }
         }
         container.addView(tokenField)
+        patField = tokenField
+
+        if (ghLoggedIn) {
+            container.addView(TextView(this).apply {
+                text = "▸ 로그아웃"
+                textSize = 12f
+                setTextColor(StudioUi.palette.error)
+                setPadding(0, dp(10), 0, 0)
+                setOnClickListener {
+                    GitHubAuth.signOut(this@ExtensionManagerActivity)
+                    Toast.makeText(this@ExtensionManagerActivity, "GitHub 로그아웃", Toast.LENGTH_SHORT).show()
+                    refreshLoginButton()
+                    dialog?.dismiss()
+                }
+            })
+        } else if (GitHubAuth.isConfigured(this)) {
+            container.addView(TextView(this).apply {
+                text = "▸ Device Flow로 로그인 (client_id 설정됨)"
+                textSize = 12f
+                setTextColor(StudioUi.palette.accent)
+                setPadding(0, dp(10), 0, 0)
+                setOnClickListener { dialog?.dismiss(); startGitHubDeviceLogin() }
+            })
+        }
+
+        val clientField = EditText(this).apply {
+            hint = "고급: GitHub OAuth client_id (Device Flow, 선택)"
+            setSingleLine(true)
+            textSize = 13f
+            setTextColor(StudioUi.palette.text)
+            setHintTextColor(StudioUi.palette.textSoft)
+            background = StudioUi.inputBg(this@ExtensionManagerActivity)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setText(GitHubAuth.clientId(this@ExtensionManagerActivity))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
+        }
+        container.addView(clientField)
 
         val builder = AlertDialog.Builder(this)
             .setTitle("Login")
             .setView(container)
-            .setPositiveButton("GitHub 로그인") { _, _ ->
-                val token = tokenField.text.toString().trim()
-                if (token.isNotBlank()) GitHubPublisher.setToken(this, token)
-                Toast.makeText(this, "브라우저에서 GitHub 승인을 진행하세요", Toast.LENGTH_SHORT).show()
-                ExtensionServerClient.startLogin(this) { msg ->
-                    runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+            .setPositiveButton("로그인") { _, _ ->
+                val client = clientField.text.toString().trim()
+                if (client.isNotBlank()) GitHubAuth.setClientId(this, client)
+                val token = GitHubAuth.normalizeToken(tokenField.text.toString())
+                if (token.isBlank()) {
+                    Toast.makeText(this, "브라우저에서 토큰을 만들고 복사한 뒤 붙여넣으세요", Toast.LENGTH_LONG).show()
+                    openTokenPage()
+                    return@setPositiveButton
+                }
+                if (!GitHubAuth.looksLikeToken(token)) {
+                    Toast.makeText(this, "GitHub 토큰 형식이 아닙니다 (ghp_…)", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                val checking = AlertDialog.Builder(this)
+                    .setMessage("토큰 확인 중…")
+                    .show()
+                GitHubAuth.loginWithToken(this, token) { ok, msg ->
+                    runOnUiThread {
+                        runCatching { checking.dismiss() }
+                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                        if (ok) {
+                            dialog?.dismiss()
+                            loginDialog = null
+                            refreshLoginButton()
+                            refresh()
+                        }
+                    }
                 }
             }
-            .setNegativeButton("닫기", null)
+            .setNegativeButton("닫기") { _, _ -> loginDialog = null }
         if (hasGoogle) {
-            builder.setNeutralButton("Gmail 로그인") { _, _ ->
+            builder.setNeutralButton("Gmail") { _, _ ->
                 try {
                     val intent = account.googleSignInClient().signInIntent
                     startActivityForResult(intent, 0x5101)
@@ -471,8 +652,59 @@ class ExtensionManagerActivity : Activity() {
                 }
             }
         }
-        dialog = builder.show()
+        loginDialog = builder.show()
+        dialog = loginDialog
         refreshLoginButton()
+        // scope이 아직 기록되지 않은 세션은 한 번 더 확인해 권한 경고를 정확하게
+        if (ghLoggedIn && GitHubAuth.scopes(this).isBlank()) {
+            GitHubAuth.refreshScopes(this) { _ ->
+                runOnUiThread {
+                    if (loginDialog?.isShowing == true) renderStatus()
+                    refreshLoginButton()
+                }
+            }
+        }
+    }
+
+    /** Opens the GitHub token creation page (scopes pre-selected) in the browser. */
+    private fun openTokenPage() {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GitHubAuth.NEW_TOKEN_URL)))
+        }.onFailure {
+            Toast.makeText(this, "브라우저를 열 수 없습니다", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** Runs the GitHub Device Flow and shows the user code + live status. */
+    private fun startGitHubDeviceLogin() {
+        val statusDialog = AlertDialog.Builder(this)
+            .setTitle("GitHub 로그인")
+            .setMessage("기기 코드를 요청하는 중…")
+            .setNegativeButton("닫기", null)
+            .show()
+        val msgView = statusDialog.findViewById<TextView>(android.R.id.message)
+        var codeText = ""
+        fun render(status: String) {
+            msgView?.text = listOf(codeText, status).filter { it.isNotBlank() }.joinToString("\n\n")
+        }
+        GitHubAuth.startLogin(
+            this,
+            onCode = { code ->
+                codeText = "브라우저에서 아래 코드를 입력하세요:\n\n${code.userCode}\n\n${code.verificationUri}"
+                render("브라우저 자동 실행됨 — 승인을 기다리는 중…")
+            },
+            onStatus = { s -> runOnUiThread { render(s) } },
+            onDone = { ok, msg ->
+                runOnUiThread {
+                    statusDialog.dismiss()
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    if (ok) {
+                        refreshLoginButton()
+                        refresh()
+                    }
+                }
+            }
+        )
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
@@ -576,7 +808,7 @@ class ExtensionManagerActivity : Activity() {
         actions.addView(textButton("Update") {
             if (entry.download.isNotBlank()) installEntry(entry) else installOfficial(entry)
         })
-        card.addView(actions)
+        card.addView(hScrollActions(actions))
         return LinearLayout(this).apply { setPadding(dp(6), dp(6), dp(6), dp(6)); setBackgroundColor(Color.TRANSPARENT); addView(card); background = StudioUi.cardBg(this@ExtensionManagerActivity) }
     }
 
@@ -692,13 +924,221 @@ class ExtensionManagerActivity : Activity() {
 
     private fun installEntry(entry: ExtensionManager.RepoEntry) {
         val manager = ExtensionManager.get(this)
-        manager.install(entry, { msg -> runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() } }) { ok, msg ->
-            runOnUiThread {
-                Toast.makeText(this, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
-                if (ok) ExtensionBridge.notifyBannersChanged()
-                refreshTabs(); refresh()
-            }
+        manager.install(
+            entry,
+            { msg -> runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() } },
+            onDone = { ok, msg ->
+                runOnUiThread {
+                    Toast.makeText(this, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                    if (ok) ExtensionBridge.notifyBannersChanged()
+                    refreshTabs(); refresh()
+                }
+            },
+            onPermissionsRequired = { manifest, newPermissions, proceed ->
+                runOnUiThread { showPermissionApprovalDialog(manifest, newPermissions, proceed) }
+            },
+        )
+    }
+
+    /**
+     * Asks before an extension gets permissions it has not been granted yet.
+     * The install stays parked in ExtensionManager until the user answers, so a
+     * refusal means nothing was written to the extensions directory.
+     */
+    private fun showPermissionApprovalDialog(
+        manifest: ExtensionManifest,
+        newPermissions: List<String>,
+        proceed: (Boolean) -> Unit,
+    ) {
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), 0)
+            addView(TextView(this@ExtensionManagerActivity).apply {
+                text = buildString {
+                    append(manifest.name).append(" ").append(manifest.version)
+                    append(" (").append(manifest.author).append(")\n\n")
+                    append("이 확장은 다음 권한을 요구합니다:\n\n")
+                    newPermissions.forEach { append("  • ").append(permissionLabel(it)).append('\n') }
+                    append("\n")
+                    append(permissionExplanation(newPermissions))
+                    append("\n\n허용하면 확장이 이 권한으로 작업을 수행할 수 있습니다. ")
+                    append("거부하면 설치가 취소됩니다.")
+                }
+                textSize = 13f
+                setTextColor(StudioUi.palette.text)
+            })
         }
+        AlertDialog.Builder(this)
+            .setTitle("권한 승인")
+            .setView(body)
+            .setCancelable(false)
+            .setPositiveButton("허용") { _, _ -> proceed(true) }
+            .setNegativeButton("거부") { _, _ -> proceed(false) }
+            .setOnCancelListener { proceed(false) }
+            .show()
+    }
+
+    private fun permissionLabel(id: String): String = when (id) {
+        "editor" -> "editor — 현재 파일 읽기/쓰기, 커서·선택 영역 제어"
+        "project" -> "project — 프로젝트 파일 읽기/쓰기"
+        "terminal" -> "terminal — 빌드 명령 실행"
+        "storage" -> "storage — 확장 전용 데이터/캐시 디렉터리"
+        "network" -> "network — 외부 네트워크 접근"
+        "notifications" -> "notifications — 알림 표시"
+        else -> "$id — 확장이 선언한 권한"
+    }
+
+    private fun permissionExplanation(perms: List<String>): String = buildList {
+        if ("network" in perms) add("네트워크 권한은 확장이 기기 밖으로 데이터를 보낼 수 있음을 의미합니다.")
+        if ("terminal" in perms) add("터미널 권한은 확장이 쉘 명령을 실행할 수 있음을 의미합니다.")
+        if ("project" in perms || "editor" in perms) add("파일 권한은 확장이 프로젝트 내용을 읽고 수정할 수 있음을 의미합니다.")
+    }.joinToString("\n")
+
+    /** Human-readable byte size: 8.1 KB / 1.2 MB. */
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024 -> String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024))
+        bytes >= 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    /**
+     * Lists every .msext package found on the device — path and size, no
+     * external file picker involved. Tapping a row installs it through the
+     * same validation path as a registry install.
+     */
+    private fun showLocalPackagesDialog() {
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        list.addView(headerText("검색 중…", 13f, StudioUi.palette.textSoft))
+        val scroller = ScrollView(this).apply { addView(list) }
+        AlertDialog.Builder(this)
+            .setTitle("기기에서 설치 (.msext)")
+            .setView(scroller)
+            .setNegativeButton("닫기", null)
+            .show()
+
+        Thread {
+            val manager = ExtensionManager.get(this)
+            val packages = manager.scanLocalPackages()
+            val rows = packages.map { it to runCatching { manager.manifestOfPackage(it.file) }.getOrNull() }
+            runOnUiThread {
+                list.removeAllViews()
+                if (rows.isEmpty()) {
+                    list.addView(emptyView("기기에서 .msext 파일을 찾지 못했습니다.\nDownload 폴더에 .msext를 넣고 다시 시도하세요."))
+                    return@runOnUiThread
+                }
+                list.addView(headerText("${rows.size}개 발견", 13f, StudioUi.palette.textSoft))
+                rows.forEach { (pkg, manifest) -> list.addView(localPackageRow(pkg, manifest)) }
+            }
+        }.start()
+    }
+
+    private fun localPackageRow(
+        pkg: ExtensionManager.LocalPackage,
+        manifest: ExtensionManifest?
+    ): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(StudioUi.SpacingLg, dp(10), StudioUi.SpacingLg, dp(10))
+        }
+        val name = manifest?.let { localize(it.name, it.languages, null) } ?: pkg.displayName
+        card.addView(
+            titleRow(
+                name,
+                manifest?.version ?: "",
+                formatSize(pkg.size),
+                StudioUi.palette.textSoft
+            )
+        )
+        // 경로는 사용자가 확인·복사할 수 있어야 한다
+        card.addView(TextView(this).apply {
+            text = pkg.path
+            textSize = 11f
+            setTextColor(StudioUi.palette.textSoft)
+            setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            setTextIsSelectable(true)
+        })
+        if (manifest == null) {
+            card.addView(TextView(this).apply {
+                text = "⚠ extension.json 없음 — 설치할 수 없는 패키지"
+                textSize = 12f
+                setTextColor(StudioUi.palette.error)
+                setPadding(0, dp(4), 0, 0)
+            })
+        } else {
+            if (manifest.description.isNotBlank()) card.addView(desc(manifest.description))
+            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
+            actions.addView(textButton("설치") {
+                ExtensionManager.get(this).installFromFile(pkg.file, { msg ->
+                    runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+                }) { ok, msg ->
+                    runOnUiThread {
+                        Toast.makeText(this, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                        if (ok) {
+                            ExtensionBridge.notifyBannersChanged()
+                            refreshTabs(); refresh()
+                        }
+                    }
+                }
+            })
+            card.addView(hScrollActions(actions))
+        }
+        card.addView(StudioUi.thinDivider(this))
+        return card
+    }
+
+    /**
+     * Packs an extension project into a .msext package on the device, using the
+     * in-app packer (no external tooling).
+     */
+    private fun startBuildMsext() {
+        val candidates = ArrayList<File>()
+        ExtensionBridge.projectDir?.invoke()?.let { p ->
+            if (File(p, "extension.json").isFile) candidates.add(p)
+        }
+        val workspace = getExternalFilesDir(null)?.let { File(it, "MobileStudio") }
+        workspace?.listFiles()
+            ?.filter { it.isDirectory && File(it, "extension.json").isFile }
+            ?.sortedBy { it.name.lowercase() }
+            ?.forEach { if (!candidates.contains(it)) candidates.add(it) }
+
+        if (candidates.isEmpty()) {
+            Toast.makeText(this, "확장 프로젝트(extension.json)를 찾지 못했습니다", Toast.LENGTH_LONG).show()
+            return
+        }
+        val names = candidates.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Build .msext — 프로젝트 선택")
+            .setItems(names) { _, which -> packProject(candidates[which]) }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun packProject(projectDir: File) {
+        val outDir = File(getExternalFilesDir(null), "MobileStudio/packages").apply { mkdirs() }
+        Thread {
+            try {
+                val result = ExtensionManager.get(this).packMsext(projectDir, outDir) { msg ->
+                    runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+                }
+                runOnUiThread {
+                    if (result == null) {
+                        Toast.makeText(this, "패키징 실패", Toast.LENGTH_LONG).show()
+                    } else {
+                        val (msext, _) = result
+                        Toast.makeText(
+                            this,
+                            "생성됨: ${msext.name} (${formatSize(msext.length())})\n${msext.absolutePath}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        ExtensionBridge.notifyBannersChanged()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "패키징 실패: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun showErrorLog() {
@@ -726,8 +1166,18 @@ class ExtensionManagerActivity : Activity() {
         text = label
         textSize = 12f
         setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        // 테두리를 주지 않으면 밝은 테마에서 surface2 위 accent 글자가 "비활성"처럼 보인다.
         setTextColor(if (danger) StudioUi.palette.error else StudioUi.palette.accent)
-        background = StudioUi.ripple(this@ExtensionManagerActivity, StudioUi.roundedInt(this@ExtensionManagerActivity, fill = StudioUi.palette.surface2, radiusDp = 4))
+        background = StudioUi.ripple(
+            this@ExtensionManagerActivity,
+            StudioUi.roundedInt(
+                this@ExtensionManagerActivity,
+                fill = StudioUi.palette.surface2,
+                stroke = if (danger) StudioUi.palette.error else StudioUi.palette.accent,
+                radiusDp = 4,
+                strokeDp = 1
+            )
+        )
         setPadding(dp(12), dp(8), dp(12), dp(8))
         StudioUi.touchLift(this)
         setOnClickListener { onClick() }
