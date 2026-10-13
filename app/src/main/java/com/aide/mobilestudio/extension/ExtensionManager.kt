@@ -249,8 +249,21 @@ class ExtensionManager(private val context: Context) {
             newArr.put(obj)
         }
         if (!found) return false
-        prefs.edit().putString(KEY_INSTALLED, newArr.toString())
-            .putStringSet(KEY_DISABLED, disabled).apply()
+        // Ordering matters: dispatchDisable must run while the extension is still
+        // marked enabled, otherwise ExtensionHost cannot load the instance it has
+        // to notify. dispatchEnable runs after, since it needs the new flag.
+        if (enabled) {
+            // Drop whatever instance was cached while disabled (it may be stale or
+            // crashed) so onEnable lands on a freshly loaded one.
+            runCatching { ExtensionHost.restart(id) }
+            prefs.edit().putString(KEY_INSTALLED, newArr.toString())
+                .putStringSet(KEY_DISABLED, disabled).apply()
+            runCatching { ExtensionHost.dispatchEnable(id) }
+        } else {
+            runCatching { ExtensionHost.dispatchDisable(id) }
+            prefs.edit().putString(KEY_INSTALLED, newArr.toString())
+                .putStringSet(KEY_DISABLED, disabled).apply()
+        }
         return true
     }
 
@@ -598,7 +611,7 @@ class ExtensionManager(private val context: Context) {
                 val commit: (approved: Set<String>) -> Unit = { approved ->
                     Thread {
                         try {
-                            commitInstall(entry, manifest, staging, approved)
+                            commitInstall(entry.id, manifest, staging, approved)
                             onProgress("설치 완료: ${manifest.name} ${manifest.version}")
                             onDone(true, "${manifest.name} ${manifest.version} 설치됨")
                         } catch (e: Exception) {
@@ -634,12 +647,12 @@ class ExtensionManager(private val context: Context) {
 
     /** Moves a validated staging directory into place and records it. */
     private fun commitInstall(
-        entry: RepoEntry,
+        extensionId: String,
         manifest: ExtensionManifest,
         staging: File,
         approved: Set<String>,
     ) {
-        val extDir = File(File(context.filesDir, "extensions"), entry.id)
+        val extDir = File(File(context.filesDir, "extensions"), extensionId)
         if (extDir.exists()) extDir.deleteRecursively()
         extDir.mkdirs()
         if (!staging.renameTo(extDir)) {
@@ -652,7 +665,7 @@ class ExtensionManager(private val context: Context) {
         val arr = JSONArray(prefs.getString(KEY_INSTALLED, null) ?: "[]")
         val newArr = JSONArray()
         for (i in 0 until arr.length()) {
-            if (arr.getJSONObject(i).optString("id") != entry.id) newArr.put(arr.getJSONObject(i))
+            if (arr.getJSONObject(i).optString("id") != extensionId) newArr.put(arr.getJSONObject(i))
         }
         newArr.put(
             JSONObject()
@@ -773,6 +786,11 @@ class ExtensionManager(private val context: Context) {
         if (packageDir.exists()) packageDir.deleteRecursively()
         packageDir.mkdirs()
         manifestFile.copyTo(File(packageDir, "extension.json"), overwrite = true)
+        // README.md is a required member on the publish side (server msext.py
+        // REQUIRED_MEMBERS), so packing without it would build a package that
+        // can never be submitted.
+        File(projectDir, "README.md").takeIf { it.isFile }
+            ?.copyTo(File(packageDir, "README.md"), overwrite = true)
         listOf("resources", "icons", "templates", "tools").forEach { sub ->
             val src = File(projectDir, sub)
             if (src.isDirectory) src.copyRecursively(File(packageDir, sub), overwrite = true)
@@ -825,6 +843,36 @@ class ExtensionManager(private val context: Context) {
         )
         onProgress("패키징 완료: ${msextFile.name}")
         return msextFile to infFile
+    }
+
+    /**
+     * The compile-time stub of the extension API, unpacked from assets on first
+     * use. Extension sources are compiled against this; at runtime PathClassLoader
+     * delegates to the app first, so the interface it was compiled against and
+     * the one it is cast to are the same class. The stub itself is never loaded.
+     */
+    fun apiStubJar(): File {
+        val out = File(context.cacheDir, "ext-api/extension-api.jar")
+        if (out.isFile && out.length() > 0) return out
+        out.parentFile?.mkdirs()
+        context.assets.open("extensions/extension-api.jar").use { input ->
+            FileOutputStream(out).use { output -> input.copyTo(output) }
+        }
+        return out
+    }
+
+    /** Compiles an extension project into build/classes.dex. */
+    fun buildExtension(
+        projectDir: File,
+        onProgress: (String) -> Unit,
+    ): ExtensionBuilder.Result {
+        val manifest = readManifest(projectDir)
+        val builder = ExtensionBuilder(
+            javac = ExtensionToolchain.javac(context),
+            androidJar = ExtensionToolchain.androidJar(context),
+            d8 = ExtensionToolchain.d8(context),
+        )
+        return builder.build(projectDir, apiStubJar(), manifest?.entryPoint, onProgress)
     }
 
     fun readManifest(dir: File): ExtensionManifest? {
@@ -939,75 +987,107 @@ class ExtensionManager(private val context: Context) {
     }
 
     /**
-     * Installs a .msext package already present on the device. Same validation
-     * as the registry install (manifest parse + Extension API version check),
-     * minus the network hop and the SHA-256 pin — the file is local.
+     * Installs a .msext package already present on the device.
+     *
+     * Runs the same [ExtensionInstallGate] as a registry download — byte limits,
+     * decompression-bomb ratio, Extension API / studio version compatibility,
+     * entryPoint<->classes.dex consistency, suspension and permission approval.
+     * Without this, "기기에서 설치" would be a way to slip arbitrary code past
+     * every check the download path enforces. The one thing a local file has no
+     * counterpart for is the server's scan record, so that SHA-256 pin is blank.
      */
-    fun installFromFile(file: File, onProgress: (String) -> Unit, onDone: (Boolean, String) -> Unit) {
+    fun installFromFile(
+        file: File,
+        onProgress: (String) -> Unit,
+        onDone: (Boolean, String) -> Unit,
+        onPermissionsRequired: ((ExtensionManifest, List<String>, (Boolean) -> Unit) -> Unit)? = null,
+    ) {
         Thread {
+            val staging = File(context.cacheDir, "ext-local-${System.currentTimeMillis()}")
             try {
                 if (!file.isFile) { onDone(false, "파일 없음: ${file.name}"); return@Thread }
                 if (!file.name.endsWith(".msext", ignoreCase = true)) {
                     onDone(false, ".msext 파일만 설치할 수 있습니다"); return@Thread
                 }
+
                 onProgress("패키지 검증 중: ${file.name}")
-                val tmp = File(context.cacheDir, "local-${System.currentTimeMillis()}.msext")
-                file.copyTo(tmp, overwrite = true)
+                val packageSha256 = sha256Of(file)
+                val sizeBytes = file.length()
 
-                val probe = File(context.cacheDir, "probe-${System.currentTimeMillis()}")
-                probe.mkdirs()
-                try {
-                    extractMsext(tmp, probe)
-                    val manifest = readManifest(probe)
-                    if (manifest == null) {
-                        onDone(false, "extension.json 없음 또는 손상"); return@Thread
+                staging.mkdirs()
+                val extractedBytes = try {
+                    extractMsext(file, staging)
+                } catch (e: SecurityException) {
+                    staging.deleteRecursively()
+                    onDone(false, "패키지 거부: ${e.message}"); return@Thread
+                }
+
+                val manifest = readManifest(staging)
+                if (manifest == null) {
+                    staging.deleteRecursively()
+                    onDone(false, "extension.json 없음 또는 손상"); return@Thread
+                }
+                val id = manifest.id
+                val hasDex = File(staging, "classes.dex").isFile
+
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val granted = prefs.getStringSet(permissionKey(id), emptySet())?.toSet() ?: emptySet()
+
+                val verdict = ExtensionInstallGate.evaluate(
+                    host = ExtensionInstallGate.Host(appVersionName = appVersionName()),
+                    manifest = manifest,
+                    pkg = ExtensionInstallGate.Package(
+                        downloadedSha256 = packageSha256,
+                        sizeBytes = sizeBytes,
+                        extractedBytes = extractedBytes,
+                        hasDex = hasDex,
+                    ),
+                    registryId = id,
+                    // A local file was never scanned, so there is no hash to pin to.
+                    registrySha256 = "",
+                    suspended = ExtensionMarketplace.get(context).isDownloadSuspended(id),
+                    suspendedReason = ExtensionMarketplace.get(context).suspensionReason(id),
+                    alreadyGranted = granted,
+                )
+                if (!verdict.ok) {
+                    staging.deleteRecursively()
+                    onDone(false, verdict.errors.joinToString("\n")); return@Thread
+                }
+
+                val commit: (approved: Set<String>) -> Unit = { approved ->
+                    Thread {
+                        try {
+                            onProgress("설치 중: ${manifest.name}")
+                            commitInstall(id, manifest, staging, approved)
+                            onProgress("설치 완료: ${manifest.name} ${manifest.version}")
+                            onDone(true, "${manifest.name} ${manifest.version} 설치됨")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "installFromFile commit failed", e)
+                            staging.deleteRecursively()
+                            onDone(false, "설치 실패: ${e.message}")
+                        }
+                    }.start()
+                }
+
+                if (verdict.needsApproval && onPermissionsRequired != null) {
+                    onProgress("권한 승인 필요: ${verdict.newPermissions.joinToString(", ")}")
+                    onPermissionsRequired(manifest, verdict.newPermissions) { proceed ->
+                        if (proceed) {
+                            commit(granted + verdict.newPermissions)
+                        } else {
+                            staging.deleteRecursively()
+                            onDone(false, "권한을 거부하여 설치를 취소했습니다")
+                        }
                     }
-                    if (manifest.extensionApiVersion > ExtensionApi.API_VERSION) {
-                        onDone(false, "Extension API ${manifest.extensionApiVersion} 필요 (이 앱은 API ${ExtensionApi.API_VERSION})")
-                        return@Thread
-                    }
-
-                    onProgress("설치 중: ${manifest.name}")
-                    val extDir = File(File(context.filesDir, "extensions"), manifest.id)
-                    if (extDir.exists()) extDir.deleteRecursively()
-                    extDir.mkdirs()
-                    extractMsext(tmp, extDir)
-                    registerInstalled(manifest, extDir)
-
-                    onProgress("설치 완료: ${manifest.name} ${manifest.version}")
-                    onDone(true, "${manifest.name} ${manifest.version} 설치됨")
-                } finally {
-                    probe.deleteRecursively()
-                    tmp.delete()
+                } else {
+                    commit(granted)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "installFromFile failed", e)
+                staging.deleteRecursively()
                 onDone(false, "설치 실패: ${e.message}")
             }
         }.start()
-    }
-
-    /** Points the installed-registry at an extension dir and marks it enabled. */
-    private fun registerInstalled(manifest: ExtensionManifest, extDir: File) {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_INSTALLED, null) ?: "[]"
-        val arr = JSONArray(raw)
-        val newArr = JSONArray()
-        for (i in 0 until arr.length()) {
-            if (arr.getJSONObject(i).optString("id") != manifest.id) newArr.put(arr.getJSONObject(i))
-        }
-        newArr.put(
-            JSONObject()
-                .put("id", manifest.id)
-                .put("dir", extDir.absolutePath)
-                .put("version", manifest.version)
-        )
-        val disabled = prefs.getStringSet(KEY_DISABLED, emptySet())?.toMutableSet() ?: mutableSetOf()
-        disabled.remove(manifest.id)
-        prefs.edit()
-            .putString(KEY_INSTALLED, newArr.toString())
-            .putStringSet(KEY_DISABLED, disabled)
-            .apply()
     }
 
     /** Reads the manifest out of a .msext package without installing it. */

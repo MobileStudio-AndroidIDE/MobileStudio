@@ -57,18 +57,44 @@ object ExtensionHost {
         }
     }
 
-    /** Dispatches a lifecycle call with error isolation; reports crashes via listener. */
+    /** 백그라운드 스레드. 확장 콜백이 어떤 I/O든 하면 UI가 얼지 않도록 보장한다.
+     *  (이전에는 dispatch 가 호출 스레드—대부분 메인—에서 동기 실행되어,
+     *   확장이 파일/네트워크 I/O 를 하면 메인스레드가 장시간 막혔다) */
+    private val dispatchExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ExtensionDispatch").apply { isDaemon = true }
+        }
+
+    /**
+     * Dispatches a lifecycle call with error isolation on a background thread.
+     *
+     * Lazily loads the extension on first dispatch: nothing else pre-loads, so
+     * without this the `loaded` map would stay empty and every callback would be
+     * dropped before the extension ever ran.
+     */
     fun dispatch(extensionId: String, call: String, block: (MobileStudioExtension, ExtensionContext) -> Unit) {
         val context = appContext ?: return
-        val le = loaded[extensionId] ?: return
+        val le = loaded[extensionId] ?: loadOrGet(context, extensionId) ?: return
         val instance = le.instance ?: return
         val extContext = le.context ?: return
-        try {
-            block(instance, extContext)
-        } catch (t: Throwable) {
-            Log.e(TAG, "extension $call crashed: $extensionId", t)
-            le.crashed = t
-            CrashReporter.onExtensionCrash(le, t)
+        dispatchExecutor.execute {
+            try {
+                block(instance, extContext)
+            } catch (t: Throwable) {
+                Log.e(TAG, "extension $call crashed: $extensionId", t)
+                le.crashed = t
+                CrashReporter.onExtensionCrash(le, t)
+            }
+        }
+    }
+
+    /** Runs one lifecycle call against every enabled extension that has code. */
+    private fun dispatchAll(call: String, block: (MobileStudioExtension, ExtensionContext) -> Unit) {
+        val context = appContext ?: return
+        ExtensionManager.get(context).installed().forEach { entry ->
+            if (entry.enabled && entry.manifest.entryPoint.isNotBlank()) {
+                dispatch(entry.manifest.id, call, block)
+            }
         }
     }
 
@@ -80,25 +106,49 @@ object ExtensionHost {
         dispatch(extensionId, "onFileOpen") { ext, ctx -> ext.onFileOpen(ctx, file) }
     }
 
-    /** Dispatches onFileOpen to every enabled installed extension (lazy, isolated). */
-    fun dispatchFileOpenForAll(file: File) {
-        val context = appContext ?: return
-        ExtensionManager.get(context).installed().forEach { entry ->
-            if (entry.enabled && !entry.manifest.entryPoint.isBlank()) dispatchFileOpen(entry.manifest.id, file)
-        }
-    }
+    /** onFileOpen for every enabled installed extension (lazy, isolated). */
+    fun dispatchFileOpenForAll(file: File) = dispatchAll("onFileOpen") { ext, ctx -> ext.onFileOpen(ctx, file) }
 
     fun dispatchFileSave(extensionId: String, file: File) {
         dispatch(extensionId, "onFileSave") { ext, ctx -> ext.onFileSave(ctx, file) }
     }
 
+    fun dispatchFileSaveForAll(file: File) = dispatchAll("onFileSave") { ext, ctx -> ext.onFileSave(ctx, file) }
+
     fun dispatchBuildStart(extensionId: String, tasks: List<String>) {
         dispatch(extensionId, "onBuildStart") { ext, ctx -> ext.onBuildStart(ctx, tasks) }
     }
 
+    fun dispatchBuildStartForAll(tasks: List<String>) =
+        dispatchAll("onBuildStart") { ext, ctx -> ext.onBuildStart(ctx, tasks) }
+
     fun dispatchBuildFinish(extensionId: String, success: Boolean) {
         dispatch(extensionId, "onBuildFinish") { ext, ctx -> ext.onBuildFinish(ctx, success) }
     }
+
+    fun dispatchBuildFinishForAll(success: Boolean) =
+        dispatchAll("onBuildFinish") { ext, ctx -> ext.onBuildFinish(ctx, success) }
+
+    fun dispatchProjectOpenForAll(projectDir: File) =
+        dispatchAll("onProjectOpen") { ext, ctx -> ext.onProjectOpen(ctx, projectDir) }
+
+    fun dispatchProjectCloseForAll() = dispatchAll("onProjectClose") { ext, ctx -> ext.onProjectClose(ctx) }
+
+    fun dispatchEnable(extensionId: String) {
+        dispatch(extensionId, "onEnable") { ext, ctx -> ext.onEnable(ctx) }
+    }
+
+    /**
+     * Must be called BEFORE the enabled flag is cleared: [loadOrGet] refuses
+     * disabled extensions, so dispatching afterwards could never load the
+     * instance it is supposed to notify.
+     */
+    fun dispatchDisable(extensionId: String) {
+        dispatch(extensionId, "onDisable") { ext, ctx -> ext.onDisable(ctx) }
+    }
+
+    /** Sent when the host activity goes away; extensions must not touch UI after this. */
+    fun dispatchShutdownForAll() = dispatchAll("onShutdown") { ext, ctx -> ext.onShutdown(ctx) }
 
     /** Drops a crashed instance so it can be restarted cleanly. */
     fun restart(extensionId: String) {

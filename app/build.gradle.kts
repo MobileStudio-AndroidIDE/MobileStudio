@@ -121,6 +121,8 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.3")
+    // EncryptedSharedPreferences for API keys / OAuth tokens / sessions.
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -154,4 +156,23 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+}
+
+// The sample extension lives in examples/ as the single source of truth (it is
+// also what CI and the host build.sh consume). Mirror it into assets so the app
+// can offer "install sample" and "build sample" without the user creating a
+// project by hand first.
+val syncExtensionSamples = tasks.register<Copy>("syncExtensionSamples") {
+    into(layout.projectDirectory.dir("src/main/assets/extensions/samples"))
+    from(rootProject.file("examples/line-counter")) {
+        into("line-counter")
+        exclude("build/**")
+    }
+    from(rootProject.file("examples")) {
+        include("*.msext")
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(syncExtensionSamples)
 }

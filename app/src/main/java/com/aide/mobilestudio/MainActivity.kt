@@ -125,6 +125,12 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     private val tabScrollPositions = mutableMapOf<String, Int>()   // file -> scroll Y
     private val tabCursorPositions = mutableMapOf<String, Int>()  // file -> cursor
     private var isBuildRunning = false
+
+    /** Task names for the in-flight build, handed to extensions via onBuildStart. */
+    private var activeBuildTasks: List<String> = emptyList()
+
+    /** Result of the build that just ended, handed to extensions via onBuildFinish. */
+    private var pendingBuildSuccess: Boolean = false
     private var unsavedChanges = false
     private var suppressEditorChange = false
     private var isProgrammaticScroll = false
@@ -924,6 +930,8 @@ Long press: Toggle Shell panel"""
     override fun onDestroy() {
         super.onDestroy()
         MobileStudioCrashGuard.activityDestroyed(this)
+        // Extension lifecycle: onShutdown — no UI may be touched after this.
+        runCatching { ExtensionHost.dispatchShutdownForAll() }
         freezeDetector?.destroy()
         memoryMonitor.destroy()
         commandPalette.destroy()
@@ -1039,6 +1047,8 @@ Long press: Toggle Shell panel"""
 
     /** Populates the Extension API bridge so extensions reach the core only through ExtensionContext. */
     private fun wireExtensionBridge() {
+        // JSON language packs under assets/i18n need an AssetManager before they load.
+        com.aide.mobilestudio.AppLanguage.bindAssets(this)
         com.aide.mobilestudio.extension.ExtensionHost.init(this)
         val bridge = com.aide.mobilestudio.extension.ExtensionBridge
         bridge.currentFile = { currentFile }
@@ -4038,6 +4048,8 @@ Long press: Toggle Shell panel"""
             unsavedFiles.remove(file.absolutePath)
             updateTabTitle()
             setStatus("Saved: ${file.name}")
+            // Extension lifecycle: onFileSave (line counters, formatters, linters).
+            runCatching { ExtensionHost.dispatchFileSaveForAll(file) }
             if (isGradleSyncFile(file)) {
                 markGradleSyncNeeded(file)
             }
@@ -5555,6 +5567,7 @@ Long press: Toggle Shell panel"""
             buildScheduler.suspendForManualBuild()
             saveAllFiles()
             ensureBuildReady {
+                activeBuildTasks = requestedTasks.toList()
                 setBuildRunning(true)
                 backgroundTaskManager.onTaskStarted(requestedTasks.toList(), dir)
                 updateBackgroundTaskIndicator()
@@ -5593,6 +5606,7 @@ Long press: Toggle Shell panel"""
                         }
                     },
                     onDone = { result ->
+                        pendingBuildSuccess = result.success
                         setBuildRunning(false)
                         backgroundTaskManager.onTaskCompleted(result.success, manualOutput.toString())
                         updateBackgroundTaskIndicator()
@@ -6299,6 +6313,9 @@ Long press: Toggle Shell panel"""
                 buildTreeView.beginBuild(cwd.name)
                 
                 val tasks = listOf(gradleArg.ifBlank { "assembleDebug" })
+                // This path never toggles setBuildRunning, so notify extensions directly.
+                activeBuildTasks = tasks
+                runCatching { ExtensionHost.dispatchBuildStartForAll(tasks) }
                 gradleRunner.run(
                     projectDir = cwd,
                     tasks = tasks,
@@ -6312,6 +6329,7 @@ Long press: Toggle Shell panel"""
                     },
                     onDone = { result ->
                         buildTreeView.endBuild(result.success, result.durationMs)
+                        runCatching { ExtensionHost.dispatchBuildFinishForAll(result.success) }
                     }
                 )
                 return ShellRunner.Result(exitCode = 0, outputLines = emptyList(), strategy = "gradle-runner")
@@ -6889,9 +6907,13 @@ Long press: Toggle Shell panel"""
             })
         }
 
+        // Extension lifecycle: onProjectOpen (project is fully wired up by now).
+        runCatching { ExtensionHost.dispatchProjectOpenForAll(targetDir) }
     }
 
     private fun closeCurrentProjectState() {
+        // Extension lifecycle: onProjectClose, but only if one was actually open.
+        if (currentProjectDir != null) runCatching { ExtensionHost.dispatchProjectCloseForAll() }
         autoSaveJob?.cancel()
         liveDiagnosticsJob?.cancel()
         pythonDiagnosticsJob?.cancel()
@@ -7867,8 +7889,12 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
 
     // MobileStudio comment
     fun openAiChatFromEditor() {
-        showBottomPanel()
-        switchToPanel("ai")
+        openAiWorkspace()
+    }
+
+    /** Opens the new full-screen AI workspace, scoped to the current project. */
+    fun openAiWorkspace() {
+        com.aide.mobilestudio.ai.ui.AiWorkspaceActivity.start(this, currentProjectDir?.absolutePath)
     }
 
     fun sendCrashToAI(crashLog: String) {
@@ -8341,7 +8367,17 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
     // MobileStudio comment
 
     private fun setBuildRunning(running: Boolean) {
+        val wasRunning = isBuildRunning
         isBuildRunning = running
+        // Extension lifecycle: fire only on a real transition, so the many
+        // start/stop call sites (Gradle, Python, JVM, NDK) all go through here
+        // exactly once per build.
+        if (running && !wasRunning) {
+            runCatching { ExtensionHost.dispatchBuildStartForAll(activeBuildTasks) }
+        } else if (!running && wasRunning) {
+            runCatching { ExtensionHost.dispatchBuildFinishForAll(pendingBuildSuccess) }
+            pendingBuildSuccess = false
+        }
         buildProgress.visibility = if (running) View.VISIBLE else View.INVISIBLE
         if (running) buildMonitor.clear()
         // Update toolbar run button: single dynamic button
@@ -9284,6 +9320,13 @@ AlertDialog.Builder(this)
             "${it.file?.absolutePath}:${it.line}:${it.column}:${it.severity}:${it.message}"
         }.filter { it.severity == BuildProblem.Severity.ERROR }
             .map { com.aide.mobilestudio.analysis.ErrorFingerprint.fromBuildProblem(it, currentProjectDir) }
+    }
+
+    /** All current problems (errors, warnings, info) for the AI validation pipeline. */
+    fun getAllProblems(): List<BuildProblem> {
+        return (liveErrors + buildErrors).distinctBy {
+            "${it.file?.absolutePath}:${it.line}:${it.column}:${it.severity}:${it.message}"
+        }
     }
 
     private fun checkProjectUpdates() {

@@ -20,9 +20,17 @@ import android.widget.TextView
 import android.widget.Toast
 import com.aide.mobilestudio.StudioUi
 import java.io.File
+import java.io.FileOutputStream
 
 private const val OFFICIAL_OWNER = "MobileStudio-AndroidIDE"
 private const val EXT_REPO = "MobileStudio-Extensions"
+
+/**
+ * Bundled sample package, mirrored from examples/ into assets by the
+ * `syncExtensionSamples` Gradle task. Keep in sync with the file the host
+ * `examples/line-counter/build.sh` produces.
+ */
+private const val SAMPLE_MSEXT_ASSET = "com.mobilestudio.linecounter-v1.0.0.msext"
 
 /**
  * Extension Manager UI — Installed / Available / Updates tabs, search,
@@ -123,6 +131,7 @@ class ExtensionManagerActivity : Activity() {
         refreshLoginButton()
         header.addView(textButton("기기에서 설치") { showLocalPackagesDialog() })
         header.addView(textButton("Build .msext") { startBuildMsext() })
+        header.addView(textButton("샘플 설치") { installSampleExtension() })
         translateBtn = textButton(translateLabel()) { toggleAutoTranslate() }
         header.addView(translateBtn)
         header.addView(textButton("Developer") { showDeveloperDialog() })
@@ -1068,17 +1077,26 @@ class ExtensionManagerActivity : Activity() {
             if (manifest.description.isNotBlank()) card.addView(desc(manifest.description))
             val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
             actions.addView(textButton("설치") {
-                ExtensionManager.get(this).installFromFile(pkg.file, { msg ->
-                    runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
-                }) { ok, msg ->
-                    runOnUiThread {
-                        Toast.makeText(this, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
-                        if (ok) {
-                            ExtensionBridge.notifyBannersChanged()
-                            refreshTabs(); refresh()
+                ExtensionManager.get(this).installFromFile(
+                    pkg.file,
+                    onProgress = { msg ->
+                        runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+                    },
+                    onDone = { ok, msg ->
+                        runOnUiThread {
+                            Toast.makeText(this, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                            if (ok) {
+                                ExtensionBridge.notifyBannersChanged()
+                                refreshTabs(); refresh()
+                            }
                         }
-                    }
-                }
+                    },
+                    // Local installs go through the same gate as downloads, so
+                    // new permissions have to be approved here too.
+                    onPermissionsRequired = { manifest, newPermissions, proceed ->
+                        runOnUiThread { showPermissionApprovalDialog(manifest, newPermissions, proceed) }
+                    },
+                )
             })
             card.addView(hScrollActions(actions))
         }
@@ -1090,6 +1108,46 @@ class ExtensionManagerActivity : Activity() {
      * Packs an extension project into a .msext package on the device, using the
      * in-app packer (no external tooling).
      */
+    /**
+     * Installs the bundled sample extension (examples/line-counter, mirrored
+     * into assets at build time). The package goes through exactly the same
+     * gate as a download: permission approval, scanned SHA-256 pin,
+     * entryPoint/classes.dex consistency, size and compression limits.
+     */
+    private fun installSampleExtension() {
+        val assetName = SAMPLE_MSEXT_ASSET
+        val out = File(cacheDir, "samples/$assetName")
+        out.parentFile?.mkdirs()
+        Thread {
+            try {
+                assets.open("extensions/samples/$assetName").use { input ->
+                    FileOutputStream(out).use { output -> input.copyTo(output) }
+                }
+                runOnUiThread {
+                    ExtensionManager.get(this).installFromFile(
+                        out,
+                        onProgress = { msg ->
+                            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+                        },
+                        onDone = { ok, message ->
+                            runOnUiThread {
+                                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                                if (ok) ExtensionBridge.notifyBannersChanged()
+                            }
+                        },
+                        onPermissionsRequired = { manifest, newPermissions, proceed ->
+                            runOnUiThread { showPermissionApprovalDialog(manifest, newPermissions, proceed) }
+                        },
+                    )
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "샘플 설치 실패: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
     private fun startBuildMsext() {
         val candidates = ArrayList<File>()
         ExtensionBridge.projectDir?.invoke()?.let { p ->
@@ -1117,7 +1175,23 @@ class ExtensionManagerActivity : Activity() {
         val outDir = File(getExternalFilesDir(null), "MobileStudio/packages").apply { mkdirs() }
         Thread {
             try {
-                val result = ExtensionManager.get(this).packMsext(projectDir, outDir) { msg ->
+                val manager = ExtensionManager.get(this)
+
+                // ---- build step: javac -> d8 -> build/classes.dex ----
+                val hasSources = projectDir.walkTopDown()
+                    .onEnter { it.name !in setOf("build", "out", ".git", ".gradle", ".idea") }
+                    .any { it.isFile && it.extension == "java" }
+                if (hasSources) {
+                    val built = manager.buildExtension(projectDir) { msg ->
+                        runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+                    }
+                    if (!built.ok) {
+                        runOnUiThread { showBuildErrors(projectDir.name, built.errors) }
+                        return@Thread
+                    }
+                }
+
+                val result = manager.packMsext(projectDir, outDir) { msg ->
                     runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
                 }
                 runOnUiThread {
@@ -1139,6 +1213,24 @@ class ExtensionManagerActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    /** Compiler diagnostics are line-based and long; a toast cannot hold them. */
+    private fun showBuildErrors(projectName: String, errors: List<String>) {
+        val text = TextView(this).apply {
+            this.text = errors.joinToString("\n")
+            textSize = 11f
+            setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            setTextColor(StudioUi.palette.error)
+            setPadding(StudioUi.SpacingLg, StudioUi.SpacingLg, StudioUi.SpacingLg, StudioUi.SpacingLg)
+            setTextIsSelectable(true)
+        }
+        val scroll = ScrollView(this).apply { addView(text) }
+        AlertDialog.Builder(this)
+            .setTitle("빌드 실패 — $projectName")
+            .setView(scroll)
+            .setPositiveButton("닫기", null)
+            .show()
     }
 
     private fun showErrorLog() {

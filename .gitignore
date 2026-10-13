@@ -13,6 +13,10 @@
 .externalNativeBuild
 .cxx
 
+# generated from examples/ by the syncExtensionSamples Gradle task
+app/src/main/assets/extensions/samples/
+examples/line-counter/build/
+
 # IDE state
 /.idea/
 .kotlin/
