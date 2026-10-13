@@ -942,9 +942,16 @@ class TerminalSession(
                     )
         )
 
-        shell?.sendRaw(
-            text
-        )
+        if (shell?.sendRaw(text) != true) {
+            /*
+             * The PTY stalled or closed mid-write. PersistentShell keeps the
+             * unwritten remainder queued, so nothing is lost here -- but log
+             * it, because a silently lost Enter is what made the shell keep
+             * the previous command on its input line while the next command
+             * was appended to it on screen.
+             */
+            Log.w(TAG, "sendRaw incomplete: ${text.take(20)}")
+        }
     }
 
     // =====================================================================

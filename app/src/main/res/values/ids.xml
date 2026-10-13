@@ -3,6 +3,7 @@
     <item name="bottom_panel" type="id" />
     <item name="breadcrumb" type="id" />
     <item name="btn_back" type="id" />
+    <item name="btn_forward" type="id" />
     <item name="btn_ai_header" type="id" />
     <item name="btn_ai_welcome" type="id" />
     <item name="btn_back_cancel" type="id" />

@@ -97,7 +97,6 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     private lateinit var buildProgress: ProgressBar
     private lateinit var fileTree: RecyclerView
     private lateinit var tvDrawerTitle: TextView
-    private lateinit var btnToggleLog: ImageButton
     private lateinit var editorOverlay: FrameLayout
     private lateinit var projectTabContainer: LinearLayout
     private lateinit var projectTabScroll: HorizontalScrollView
@@ -479,9 +478,9 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
                     type = TutorialGuide.StepType.INTERACTIVE
                 ),
                 TutorialGuide.Step(
-                    targetView = { findViewById(R.id.btn_menu) },
+                    targetView = { findViewById(R.id.menu_view) },
                     title = if (isKo) "파일 트리/메뉴 열기" else "File Tree / Menu",
-                    description = if (isKo) "왼쪽 가장자리 스와이프 또는 햄버거 메뉴로 파일 트리를 엽니다. 검색도 가능." else "Swipe from left edge or tap hamburger menu to open file tree. Search supported.",
+                    description = if (isKo) "왼쪽 가장자리 스와이프 또는 View > Explorer 로 파일 트리를 엽니다. 검색도 가능." else "Swipe from left edge or open View > Explorer to open the file tree. Search supported.",
                     position = TutorialGuide.TooltipPosition.RIGHT,
                     type = TutorialGuide.StepType.INTERACTIVE
                 ),
@@ -1014,27 +1013,6 @@ Long press: Toggle Shell panel"""
         }
     }
 
-    private fun cancelBackAction() {
-        MobileStudioCrashGuard.safe(this, "MainActivity.cancelBackAction") {
-            when {
-                this::drawerLayout.isInitialized && drawerLayout.isDrawerOpen(GravityCompat.START) ->
-                    drawerLayout.closeDrawer(GravityCompat.START)
-
-                this::drawerLayout.isInitialized && drawerLayout.isDrawerOpen(GravityCompat.END) ->
-                    drawerLayout.closeDrawer(GravityCompat.END)
-
-                findReplaceVisible -> hideFindReplaceSafely()
-                this::bottomPanel.isInitialized && bottomPanel.visibility == View.VISIBLE ->
-                    hideBottomPanel()
-
-                else -> {
-                    if (this::codeEditor.isInitialized) codeEditor.clearFocus()
-                    setStatus("Back cancelled")
-                }
-            }
-        }
-    }
-
     private fun hideFindReplaceSafely() {
         MobileStudioCrashGuard.safe(this, "MainActivity.hideFindReplace") {
             hideFindReplace()
@@ -1127,7 +1105,6 @@ Long press: Toggle Shell panel"""
         buildProgress = find(R.id.build_progress_mini, "build_progress_mini")
         fileTree = find(R.id.file_tree, "file_tree")
         tvDrawerTitle = find(R.id.tv_drawer_title, "tv_drawer_title")
-        btnToggleLog = find(R.id.btn_toggle_log, "btn_toggle_log")
         editorOverlay = find(R.id.editor_overlay, "editor_overlay")
         breadcrumb = find(R.id.breadcrumb, "breadcrumb")
         projectTabContainer = find(R.id.project_tab_container, "project_tab_container")
@@ -1140,23 +1117,18 @@ Long press: Toggle Shell panel"""
     // MobileStudio comment
 
     private fun setupToolbar() {
-        findViewById<ImageButton>(R.id.btn_back).setOnClickListener {            MobileStudioCrashGuard.safe(this, "MainActivity.backButton") {
-                handleBackAction()
+        // Row B is now a minimal toolbar: back/forward file history, project
+        // name + badges + build status, sync, run and the build spinner.
+        // Everything the old rows (quick actions / build toolbar) did lives in
+        // the File/Edit/View/Build/Run/Tools text menus.
+        findViewById<ImageButton>(R.id.btn_back)?.setOnClickListener {
+            MobileStudioCrashGuard.safe(this, "MainActivity.backButton") {
+                navigateBack()
             }
         }
-        findViewById<ImageButton>(R.id.btn_back_cancel).setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.cancelBackButton") {
-                cancelBackAction()
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_menu).setOnClickListener {
-            if (drawerLayout.isDrawerOpen(GravityCompat.START))
-                drawerLayout.closeDrawer(GravityCompat.START)
-            else drawerLayout.openDrawer(GravityCompat.START)
-        }
-        findViewById<ImageButton>(R.id.btn_ai_header)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.aiHeaderButton") {
-                launchAiAssistant()
+        findViewById<ImageButton>(R.id.btn_forward)?.setOnClickListener {
+            MobileStudioCrashGuard.safe(this, "MainActivity.forwardButton") {
+                navigateForward()
             }
         }
         val runButton = findViewById<ImageButton>(R.id.btn_run)
@@ -1170,120 +1142,104 @@ Long press: Toggle Shell panel"""
             true
         }
         findViewById<TextView>(R.id.tools_build_option_label).setOnClickListener { showBuildTaskDialog() }
-        findViewById<ImageButton>(R.id.btn_download).setOnClickListener {
-            if (drawerLayout.isDrawerOpen(GravityCompat.END))
-                drawerLayout.closeDrawer(GravityCompat.END)
-            else drawerLayout.openDrawer(GravityCompat.END)
-        }
-        btnToggleLog.setOnClickListener {
-            if (bottomPanel.visibility == View.VISIBLE) {
-                hideBottomPanel()
-            } else showBottomPanel()
-        }
-        findViewById<ImageButton>(R.id.btn_rebuild).setOnClickListener {
-            if (!isBuildRunning) runGradleTask("clean", "assembleDebug")
-        }
-        findViewById<ImageButton>(R.id.btn_clean).setOnClickListener {
-            if (!isBuildRunning) runGradleTask("clean")
-        }
-        findViewById<ImageButton>(R.id.btn_stop).setOnClickListener { stopBuild() }
-        // Old btn_tools (build toolbar) now opens tools panel
-        val toolsButton = findViewById<ImageButton>(R.id.btn_tools)
-        toolsButton?.setOnClickListener {
-            if (drawerLayout.isDrawerOpen(GravityCompat.END))
-                drawerLayout.closeDrawer(GravityCompat.END)
-            else drawerLayout.openDrawer(GravityCompat.END)
-        }
-        toolsButton?.setOnLongClickListener {
-            showBottomPanel()
-            switchToPanel("shell")
-            true
-        }
-        // Save button
-        findViewById<ImageButton>(R.id.btn_save).setOnClickListener {
-            saveCurrentFile()
-            showToast("Saved")
-        }
-        // Find/Replace toggle
-        findViewById<ImageButton>(R.id.btn_find).setOnClickListener {
-            toggleFindReplace()
-        }
-        // Format code
-        findViewById<ImageButton>(R.id.btn_format).setOnClickListener {
-            formatCurrentFile()
-        }
-        // Install APK
-        findViewById<ImageButton>(R.id.btn_install_apk).setOnClickListener {
-            installLatestApk()
-        }
-        // Undo / Redo
-        findViewById<ImageButton>(R.id.btn_undo).setOnClickListener {
-            codeEditor.undo()
-        }
-        findViewById<ImageButton>(R.id.btn_redo).setOnClickListener {
-            codeEditor.redo()
-        }
-        // Editor navigation helpers.
+        // Editor navigation helpers (btn_preview still exists as a hidden
+        // placeholder — updatePreviewButtonVisibility() flips its visibility).
         findViewById<ImageButton>(btn_preview).setOnClickListener {
             val file = currentFile ?: run {
                 showToast("Open a file first"); return@setOnClickListener
             }
             openCurrentPreview(file)
         }
-        findViewById<ImageButton>(R.id.btn_community).setOnClickListener {
-            HtmlViewerActivity.openAsset(this, "index.html", "MobileStudio")
-        }
-        findViewById<ImageButton>(R.id.btn_extensions).setOnClickListener {
-            startActivity(android.content.Intent(this, com.aide.mobilestudio.extension.ExtensionManagerActivity::class.java))
-        }
-        findViewById<ImageButton>(R.id.btn_file_explorer).setOnClickListener {
-            openFileExplorer()
-        }
-        // Quick action buttons
-        findViewById<ImageButton>(R.id.btn_ai)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.aiButton") {
-                showBottomPanel()
-                switchToPanel("ai")
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_git)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.gitButton") {
-                if (drawerLayout.isDrawerOpen(GravityCompat.END))
-                    drawerLayout.closeDrawer(GravityCompat.END)
-                else
-                    drawerLayout.openDrawer(GravityCompat.END)
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_terminal_toolbar)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.terminalButton") {
-                showBottomPanel()
-                switchToPanel("shell")
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_logcat)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.logcatButton") {
-                showBottomPanel()
-                switchToPanel("logcat")
-                ensureLogcatStarted()
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_run_config)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.runConfigButton") {
-                showBuildTaskDialog()
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_device)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.deviceButton") {
-                showDevicePicker()
-            }
-        }
-        findViewById<ImageButton>(R.id.btn_settings_toolbar)?.setOnClickListener {
-            MobileStudioCrashGuard.safe(this, "MainActivity.settingsButton") {
-                showIdeMenu()
-            }
-        }
         bindTopTextMenus()
         setupToolsPanel()
+        updateNavigationButtons()
+    }
+
+    // ------------------------------------------------------------------
+    // File navigation history (toolbar Back / Forward)
+    // ------------------------------------------------------------------
+    private val navBackStack = java.util.ArrayDeque<String>()
+    private val navForwardStack = java.util.ArrayDeque<String>()
+    private var isNavigatingHistory = false
+
+    /**
+     * Records that the editor switched from [previousPath] to [newPath].
+     * Browser semantics: a new navigation pushes the previous file onto the
+     * back stack and wipes the forward stack. Navigations caused by
+     * navigateBack/navigateForward are guarded by [isNavigatingHistory].
+     */
+    private fun recordFileNavigation(previousPath: String?, newPath: String) {
+        if (isNavigatingHistory) return
+        if (previousPath != null && previousPath != newPath) {
+            navBackStack.addLast(previousPath)
+            while (navBackStack.size > 100) navBackStack.removeFirst()
+            navForwardStack.clear()
+        }
+        updateNavigationButtons()
+    }
+
+    /** Pops the editor's file history and opens the previous file. No-op on an empty stack. */
+    fun navigateBack() {
+        navigateHistory(navBackStack, navForwardStack)
+    }
+
+    /** Redo: opens the file that was left via navigateBack. No-op on an empty stack. */
+    fun navigateForward() {
+        navigateHistory(navForwardStack, navBackStack)
+    }
+
+    private fun navigateHistory(from: java.util.ArrayDeque<String>, to: java.util.ArrayDeque<String>) {
+        try {
+            // Drop entries whose file has since disappeared.
+            while (!from.isEmpty()) {
+                val candidate = from.peekLast() ?: break
+                if (File(candidate).isFile) break
+                from.pollLast()
+            }
+            if (from.isEmpty()) return
+            val target = from.peekLast() ?: return
+            val current = currentFile?.absolutePath
+            isNavigatingHistory = true
+            try {
+                runCatching { openFile(File(target)) }
+            } finally {
+                isNavigatingHistory = false
+            }
+            // Always consume the entry we acted on so the button can never get
+            // stuck; only carry the old file over when the jump really happened.
+            from.pollLast()
+            if (current != null && current != target && currentFile?.absolutePath == target) {
+                to.addLast(current)
+            }
+        } finally {
+            updateNavigationButtons()
+        }
+    }
+
+    /** Dims/disables the navigation buttons while their stack is empty. */
+    private fun updateNavigationButtons() {
+        val backEnabled = !navBackStack.isEmpty()
+        val forwardEnabled = !navForwardStack.isEmpty()
+        findViewById<ImageButton>(R.id.btn_back)?.apply {
+            alpha = if (backEnabled) 1.0f else 0.35f
+            isClickable = backEnabled
+        }
+        findViewById<ImageButton>(R.id.btn_forward)?.apply {
+            alpha = if (forwardEnabled) 1.0f else 0.35f
+            isClickable = forwardEnabled
+        }
+    }
+
+    private fun toggleToolsDrawer() {
+        if (drawerLayout.isDrawerOpen(GravityCompat.END))
+            drawerLayout.closeDrawer(GravityCompat.END)
+        else drawerLayout.openDrawer(GravityCompat.END)
+    }
+
+    private fun toggleExplorerDrawer() {
+        if (drawerLayout.isDrawerOpen(GravityCompat.START))
+            drawerLayout.closeDrawer(GravityCompat.START)
+        else drawerLayout.openDrawer(GravityCompat.START)
     }
 
     private fun showDevicePicker() {
@@ -1315,13 +1271,8 @@ Long press: Toggle Shell panel"""
         }
     }
 
-    private fun setupToolsPanel() {        // Toggle tools panel from toolbar
-        findViewById<View>(R.id.btn_toggle_tools)?.setOnClickListener {
-            if (drawerLayout.isDrawerOpen(GravityCompat.END))
-                drawerLayout.closeDrawer(GravityCompat.END)
-            else
-                drawerLayout.openDrawer(GravityCompat.END)
-        }
+    private fun setupToolsPanel() {
+        // Tools drawer toggle lives in the View menu now ("Tools Panel").
         // Sync button ??triggers GradleSyncManager
         findViewById<View>(R.id.btn_sync_now)?.setOnClickListener {
             currentProjectDir?.let { dir ->
@@ -1438,8 +1389,6 @@ Long press: Toggle Shell panel"""
     }
 
     private fun bindTopTextMenus() {
-        findViewById<View>(R.id.btn_menu_main)?.setOnClickListener { showMainMenu() }
-
         findViewById<TextView>(R.id.menu_file)?.setOnClickListener { showFileMenu() }
         findViewById<TextView>(R.id.menu_edit)?.setOnClickListener { showEditMenu() }
         findViewById<TextView>(R.id.menu_view)?.setOnClickListener { showViewMenu() }
@@ -1526,7 +1475,14 @@ Long press: Toggle Shell panel"""
         },
         ui("MobileStudio Community") to { HtmlViewerActivity.openAsset(this, "index.html", "MobileStudio") },
         ui("Open Shell Panel") to { showBottomPanel(); switchToPanel("shell") },
-        ui("File Explorer") to { openFileExplorer() }
+        ui("File Explorer") to { openFileExplorer() },
+        // Formerly quick-action toolbar buttons.
+        ui("AI Panel") to { showBottomPanel(); switchToPanel("ai") },
+        ui("Terminal") to { showBottomPanel(); switchToPanel("shell") },
+        ui("Logcat") to { showBottomPanel(); switchToPanel("logcat"); ensureLogcatStarted() },
+        ui("Device Picker") to { showDevicePicker() },
+        ui("Run Configuration") to { showBuildTaskDialog() },
+        ui("Tools Drawer") to { toggleToolsDrawer() }
     ))
 
     private fun openFileExplorer() {
@@ -1539,7 +1495,10 @@ Long press: Toggle Shell panel"""
         ui("Redo") to { codeEditor.redo() },
         ui("Find / Replace") to { toggleFindReplace() },
         ui("Duplicate Line") to { codeEditor.duplicateCurrentLine() },
-        ui("Delete Line") to { codeEditor.deleteCurrentLine() }
+        ui("Delete Line") to { codeEditor.deleteCurrentLine() },
+        // Formerly quick-action toolbar buttons.
+        ui("Save") to { saveCurrentFile(); showToast(ui("Saved")) },
+        ui("Format Code") to { formatCurrentFile() }
     ))
 
     private fun showViewMenu() = showTextMenu(ui("View"), listOf(
@@ -1548,7 +1507,13 @@ Long press: Toggle Shell panel"""
         ui("Build Output") to { showBottomPanel(); switchToPanel("build") },
         ui("Problems") to { showBottomPanel(); switchToPanel("problems") },
         ui("Logcat") to { showBottomPanel(); switchToPanel("logcat") },
-        ui("XML Preview") to { openCurrentXmlPreview() }
+        ui("XML Preview") to { openCurrentXmlPreview() },
+        // Formerly toolbar toggle buttons.
+        ui("Bottom Panel") to { if (bottomPanel.visibility == View.VISIBLE) hideBottomPanel() else showBottomPanel() },
+        ui("Tools Panel") to { toggleToolsDrawer() },
+        ui("Explorer") to { toggleExplorerDrawer() },
+        ui("Word Wrap") to { toggleWordWrap() },
+        ui("Go to Line") to { showGoToLineDialog() }
     ))
 
     private fun showNavigateMenu() = showTextMenu(ui("Navigate"), listOf(
@@ -3593,6 +3558,7 @@ Long press: Toggle Shell panel"""
             return
         }
         // Save scroll position of previous file
+        val previousNavPath = currentFile?.absolutePath
         currentFile?.let {
             tabScrollPositions[it.absolutePath] = (codeEditor.parent as? ScrollView)?.scrollY ?: 0
             tabCursorPositions[it.absolutePath] = codeEditor.selectionStart
@@ -3600,6 +3566,7 @@ Long press: Toggle Shell panel"""
 
         if (!openTabs.contains(file)) openTabs.add(file)
         currentFile = file
+        recordFileNavigation(previousNavPath, file.absolutePath)
         unsavedChanges = false
         StorageHelper.pushRecentFile(this, file.absolutePath)
         scope.launch(Dispatchers.IO) {
@@ -5065,7 +5032,12 @@ Long press: Toggle Shell panel"""
 
     private fun showBuildMenu() = showTextMenu(ui("Build"), listOf(
         ui("Build Task...") to { showBuildTaskDialog() },
-        ui("Inspect Project") to { runProjectInspection() }
+        ui("Inspect Project") to { runProjectInspection() },
+        // Formerly build toolbar buttons.
+        ui("Rebuild") to { if (!isBuildRunning) runGradleTask("clean", "assembleDebug") },
+        ui("Stop") to { stopBuild() },
+        ui("Install APK") to { installLatestApk() },
+        ui("Clean") to { if (!isBuildRunning) runGradleTask("clean") }
     ))
 
     private fun runProjectInspection() {
@@ -6678,12 +6650,7 @@ Long press: Toggle Shell panel"""
         installApk(apk)
     }
 
-    private fun findLatestApk(): File? {
-        val root = currentProjectDir ?: return null
-        return root.walkTopDown()
-            .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
-            .maxByOrNull { it.lastModified() }
-    }
+    private fun findLatestApk(): File? = BuildApkLocator.latestInstallableApk(currentProjectDir)
 
     private fun findLatestJar(): File? {
         val root = currentProjectDir ?: return null
@@ -6766,17 +6733,20 @@ Long press: Toggle Shell panel"""
 
     private fun openProject(dir: File) = openProject(dir, askConfirmation = true)
 
-    private fun openProject(dir: File, askConfirmation: Boolean) {
+    /**
+     * Opens [dir] as the active project.
+     *
+     * Projects join the tab strip instead of replacing it, so several can be
+     * open at once (tap a tab to switch, long-press to close). Nothing is
+     * closed behind the user's back, which is why the old "the project that is
+     * currently open will be closed" confirmation is gone.
+     *
+     * @param askConfirmation kept for call-site compatibility; switching no
+     *   longer destroys the previous project, so there is nothing to confirm
+     */
+    private fun openProject(dir: File, @Suppress("UNUSED_PARAMETER") askConfirmation: Boolean) {
         val targetDir = dir
-        val current = currentProjectDir
-        if (askConfirmation && current != null && !sameFile(current, targetDir)) {
-            AlertDialog.Builder(this)
-                .setMessage("The project that is currently open will be closed. Do you want to continue?")
-                .setPositiveButton("Yes") { _, _ -> openProject(dir, askConfirmation = false) }
-                .setNegativeButton("No", null)
-                .show()
-            return
-        }
+        saveCurrentFile()
         closeCurrentProjectState()
         currentProjectDir = targetDir
         com.aide.mobilestudio.ai.agent.ToolRegistry.setCurrentProjectDir(targetDir)
@@ -6784,8 +6754,7 @@ Long press: Toggle Shell panel"""
         currentProjectKind = detectProjectKind(targetDir)
         saveLastProject(targetDir)
         StorageHelper.pushRecentProject(this, targetDir.absolutePath)
-        projectTabs.clear()
-        projectTabs.add(targetDir)
+        if (projectTabs.none { sameFile(it, targetDir) }) projectTabs.add(targetDir)
         refreshProjectTabs()
         tvProjectName.text = targetDir.name
         tvDrawerTitle.text = targetDir.name
@@ -8379,6 +8348,9 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             pendingBuildSuccess = false
         }
         buildProgress.visibility = if (running) View.VISIBLE else View.INVISIBLE
+        // Row B spinner (moved up from the deleted build toolbar row)
+        findViewById<ProgressBar>(R.id.build_progress)?.visibility =
+            if (running) View.VISIBLE else View.INVISIBLE
         if (running) buildMonitor.clear()
         // Update toolbar run button: single dynamic button
         findViewById<ImageButton>(R.id.btn_run)?.apply {
@@ -8556,7 +8528,6 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         val targetHeight = currentBottomPanelTargetHeight()
         if (bottomPanel.visibility == View.VISIBLE && bottomPanel.height > 0) {
             syncBottomPanelToggleRotation(expanded = true)
-            btnToggleLog.setColorFilter(StudioUi.palette.accent)
             return
         }
         bottomPanel.visibility = View.VISIBLE
@@ -8573,7 +8544,6 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             .setInterpolator(StudioUi.DefaultInterpolator)
             .start()
         syncBottomPanelToggleRotation(expanded = true)
-        btnToggleLog.setColorFilter(StudioUi.palette.accent)
         updateDrawerLockState()
     }
 
@@ -8620,7 +8590,6 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             ?: bottomPanel.layoutParams.height.takeIf { it > 0 }
             ?: currentBottomPanelTargetHeight()
         bottomPanelExpandedHeight = startHeight
-        btnToggleLog.setColorFilter(StudioUi.palette.textSoft)
         animateBottomPanelHeight(startHeight, 0) {
             bottomPanel.visibility = View.GONE
             bottomPanel.layoutParams = bottomPanel.layoutParams.apply { height = bottomPanelExpandedHeight }
@@ -8780,7 +8749,7 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
 
     private fun syncBottomPanelToggleRotation(expanded: Boolean, animate: Boolean = true) {
         val target = if (expanded) 180f else 0f
-        listOf(btnToggleLog, findViewById<ImageButton>(R.id.btn_hide_panel)).forEach { button ->
+        listOfNotNull(findViewById<ImageButton>(R.id.btn_hide_panel)).forEach { button ->
             button.animate().cancel()
             if (animate) {
                 button.animate()

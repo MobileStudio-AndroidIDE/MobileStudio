@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import com.aide.mobilestudio.ai.AiActivity
+import com.aide.mobilestudio.ai.ui.AiWorkspaceActivity
 import com.aide.mobilestudio.ai.OpencodeEnvironment
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -264,10 +265,7 @@ class ToolsActivity : AppCompatActivity() {
                 return@secondaryButton
             }
             val apkDir = File(projectDir, "app/build/outputs/apk")
-            val latestApk = apkDir.walkTopDown()
-                .filter { it.isFile && it.extension == "apk" }
-                .sortedByDescending { it.lastModified() }
-                .firstOrNull()
+            val latestApk = BuildApkLocator.latestInstallableApk(apkDir)
             if (latestApk == null) {
                 toast("No APK files found")
                 return@secondaryButton
@@ -846,9 +844,9 @@ class ToolsActivity : AppCompatActivity() {
         card.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(primaryButton("Open AI Chat") {
+            addView(primaryButton("Open AI Workspace") {
                 try {
-                    AiActivity.start(this@ToolsActivity)
+                    AiWorkspaceActivity.start(this@ToolsActivity)
                 } catch (e: Exception) {
                     toast("Failed to start AI: ${e.message}")
                 }

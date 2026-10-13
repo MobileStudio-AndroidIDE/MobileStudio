@@ -419,6 +419,41 @@ class TerminalView @JvmOverloads constructor(
      */
     private var composingSent = ""
 
+    /**
+     * The shell just consumed a line: its input buffer is empty again, so the
+     * IME's idea of what it has already sent is void. Forgetting this made the
+     * next line's composing delta start from the previous command's text and
+     * emit backspace runs the shell could not honour.
+     */
+    private fun endInputLine() {
+        composingSent = ""
+    }
+
+    /** One character left the shell's input line (backspace). */
+    private fun dropComposingChar() {
+        if (composingSent.isNotEmpty()) {
+            composingSent = composingSent.dropLast(1)
+        }
+    }
+
+    /**
+     * How many characters the shell currently holds on the input line, as the
+     * emulator sees them. The shell echoes everything it accepts, so this is
+     * the ground truth the IME delta has to be clamped against.
+     */
+    private fun shellLineLength(): Int {
+        val emulator = session?.emulator ?: return 0
+        val row = emulator.getCursorRow()
+        if (row < 0) return 0
+        var n = 0
+        for (cell in emulator.getLine(row)) {
+            if (cell.char == '\u0000') break
+            n++
+        }
+        // Moving the cursor left with arrows must never widen the erase range.
+        return n.coerceAtMost(emulator.getCursorCol().coerceAtLeast(0))
+    }
+
     inner class TerminalInputConnection :
         BaseInputConnection(
             this@TerminalView,
@@ -462,11 +497,15 @@ class TerminalView @JvmOverloads constructor(
                     /*
                      * IME replaced its composing buffer.
                      *
-                     * Send backspaces for the old composing
-                     * characters and then the new text.
+                     * Only as many backspaces as the shell's line actually
+                     * holds can be honoured -- after Enter or `clear` the line
+                     * is empty, and blindly sending `sent.length` of them
+                     * desyncs the shell's input buffer from the screen.
                      */
                     emit(
-                        "\b".repeat(sent.length) + t
+                        "\b".repeat(
+                            boundedBackspaces(sent.length, shellLineLength())
+                        ) + t
                     )
                 }
 
@@ -504,12 +543,12 @@ class TerminalView @JvmOverloads constructor(
                 }
 
                 /*
-                 * Replace only the changed portion of the
-                 * composing buffer.
+                 * Replace only the changed portion of the composing buffer,
+                 * bounded by what the shell's line can actually erase.
                  */
                 emit(
                     "\b".repeat(
-                        old.length - common
+                        boundedBackspaces(old.length - common, shellLineLength())
                     ) +
                         t.substring(common)
                 )
@@ -590,6 +629,7 @@ class TerminalView @JvmOverloads constructor(
                 KeyEvent.KEYCODE_ENTER -> {
 
                     dismissCompletion()
+                    endInputLine()
 
                     /*
                      * No local echo.
@@ -604,6 +644,7 @@ class TerminalView @JvmOverloads constructor(
                 KeyEvent.KEYCODE_DEL -> {
 
                     currentSession.sendRaw("\b")
+                    dropComposingChar()
 
                     return true
                 }
@@ -754,6 +795,8 @@ class TerminalView @JvmOverloads constructor(
              * releases a single-shot Ctrl latch.
              */
             releaseCtrlLatch()
+
+            endInputLine()
 
             session?.sendRaw("\n")
 
@@ -930,6 +973,7 @@ class TerminalView @JvmOverloads constructor(
             KeyEvent.KEYCODE_ENTER -> {
 
                 dismissCompletion()
+                endInputLine()
 
                 /*
                  * No localEcho().
@@ -945,6 +989,7 @@ class TerminalView @JvmOverloads constructor(
                  * No localEcho().
                  */
                 currentSession.sendRaw("\b")
+                dropComposingChar()
 
                 return true
             }
@@ -1244,6 +1289,8 @@ class TerminalView @JvmOverloads constructor(
         dismissCompletion()
 
         releaseCtrlLatch()
+
+        endInputLine()
 
         session?.sendRaw("\n")
     }
@@ -3134,6 +3181,18 @@ class TerminalView @JvmOverloads constructor(
 
         session?.emulator?.clear()
 
+        /*
+         * The view is now blank, but the shell's own input buffer is not: it
+         * still holds whatever was half-typed. Until the two agree, the next
+         * thing the user types is echoed onto the shell's leftover line -- the
+         * reported "clearls" merge. Ctrl-U (kill line) empties it, but only
+         * when nothing is running that could interpret it as its own input.
+         */
+        endInputLine()
+        if (session?.processTracker?.currentProcess == null) {
+            session?.sendRaw("\u0015")
+        }
+
         highlightCache.clear()
 
         selectionStart =
@@ -3263,3 +3322,14 @@ class TerminalView @JvmOverloads constructor(
 
 }
 
+
+/**
+ * Clamps an erase request to what the shell's input line can actually honour.
+ *
+ * The IME's model of the line and the shell's real line drift apart at every
+ * line boundary -- Enter, `clear`, a fresh prompt. Sending more backspaces
+ * than the line holds is never useful, and the resulting divergence is what
+ * made typed text appear merged with the previous command.
+ */
+internal fun boundedBackspaces(requested: Int, shellLineLength: Int): Int =
+    requested.coerceAtLeast(0).coerceAtMost(shellLineLength.coerceAtLeast(0))

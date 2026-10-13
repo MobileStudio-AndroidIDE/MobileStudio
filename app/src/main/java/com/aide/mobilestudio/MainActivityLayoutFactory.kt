@@ -247,8 +247,6 @@ private fun Context.buildMainSurface(): View {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             addView(buildTopTextMenu())
             addView(buildPrimaryToolbar())
-            addView(buildQuickActions())
-            addView(buildBuildToolbar())
             addView(buildProjectTabStrip())
             addView(buildTabStrip())
             addView(buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -288,8 +286,6 @@ private fun Context.buildLandscapeMainSurface(): View {
                 
                 addView(ctx.buildTopTextMenu())
                 addView(ctx.buildPrimaryToolbar())
-                addView(ctx.buildQuickActions())
-                addView(ctx.buildBuildToolbar())
                 addView(ctx.buildProjectTabStrip())
                 addView(ctx.buildTabStrip())
                 addView(ctx.buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -378,14 +374,21 @@ private fun Context.buildTopTextMenu(): View {
 
 private fun Context.buildPrimaryToolbar(): View {
     return LinearLayout(this).apply {
+        // Row B is the ONLY remaining toolbar row — it keeps the legacy id so
+        // applyTabletMode()/applyPhoneMode() in MainActivity keep working.
+        id = R.id.build_icon_toolbar
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(4), 0, dp(4), 0)
         setBackgroundColor(c(StudioUi.LayerToolbar))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
 
-        // Left: Explorer toggle (file drawer)
-        addView(iconButton(R.id.btn_menu, android.R.drawable.ic_menu_sort_by_size, StudioUi.ActiveBlue, "Explorer", 36))
+        // Left: file history navigation (wired in MainActivity.setupToolbar)
+        addView(iconButton(R.id.btn_back, android.R.drawable.ic_menu_revert, StudioUi.TextSoft, "Back", 34))
+        addView(iconButton(R.id.btn_forward, android.R.drawable.ic_media_ff, StudioUi.TextSoft, "Forward", 34))
+
+        // Spacer: pushes the project name group toward the center
+        addView(View(this@buildPrimaryToolbar), LinearLayout.LayoutParams(0, 1, 1f))
 
         // Center: Project name (fills remaining space)
         addView(TextView(this@buildPrimaryToolbar).apply {
@@ -433,109 +436,28 @@ private fun Context.buildPrimaryToolbar(): View {
             setPadding(dp(4), 0, dp(4), 0)
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // Right: Sync button
-        addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.ActiveBlue, "Sync", 32))
+        // Spacer: pushes sync/run to the right edge
+        addView(View(this@buildPrimaryToolbar), LinearLayout.LayoutParams(0, 1, 1f))
 
-        // Right: Run/Build button
+        // Right: Sync button
+        addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 32))
+
+        // Right: Run/Build button — 유일하게 색을 남긴다(주요 액션)
         addView(iconButton(R.id.btn_run, android.R.drawable.ic_media_play, StudioUi.ActiveGreen, "Build", 34))
 
-        // Right: Tools panel toggle
-        addView(iconButton(R.id.btn_toggle_tools, android.R.drawable.ic_menu_preferences, StudioUi.ActivePurple, "Tools", 32))
-
-        // Right: Bottom panel toggle
-        addView(iconButton(R.id.btn_toggle_log, android.R.drawable.arrow_up_float, StudioUi.ActiveBlue, "Panel", 32))
-
-        // Hidden buttons kept for backward compat
-        addView(hiddenIcon(R.id.btn_back))
-        addView(hiddenIcon(R.id.btn_back_cancel))
-        addView(hiddenIcon(R.id.btn_stop))
-        addView(hiddenIcon(R.id.btn_rebuild))
-        addView(hiddenIcon(R.id.btn_clean))
-        addView(hiddenIcon(R.id.btn_download))
-        addView(hiddenIcon(R.id.btn_install_apk))
-        addView(hiddenIcon(R.id.btn_community))
-        addView(hiddenIcon(R.id.btn_extensions))
-        addView(hiddenIcon(R.id.btn_undo))
-        addView(hiddenIcon(R.id.btn_redo))
-        addView(hiddenIcon(R.id.btn_file_explorer))
-        addView(hiddenIcon(R.id.btn_save))
-        addView(hiddenIcon(R.id.btn_find))
-        addView(hiddenIcon(R.id.btn_format))
-        addView(hiddenIcon(R.id.btn_menu_main))
-        addView(hiddenIcon(R.id.btn_ai_header))
-        addView(hiddenIcon(R.id.btn_preview))
-        addView(hiddenIcon(R.id.btn_more_menu))
-    }
-}
-
-private fun Context.buildQuickActions(): View {
-    return HorizontalScrollView(this).apply {
-        id = R.id.quick_actions_scroll
-        isHorizontalScrollBarEnabled = false
-        setBackgroundColor(c(StudioUi.Surface))
-        addView(LinearLayout(this@buildQuickActions).apply {
-            id = R.id.quick_actions_container
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), 0, dp(4), 0)
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32))
-            addView(iconButton(R.id.btn_undo, android.R.drawable.ic_menu_revert, StudioUi.InactiveIcon, "Undo", 28))
-            addView(iconButton(R.id.btn_redo, android.R.drawable.ic_menu_revert, StudioUi.InactiveIcon, "Redo", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_save, android.R.drawable.ic_menu_save, StudioUi.ActiveGreen, "Save", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_find, android.R.drawable.ic_menu_search, StudioUi.ActiveBlue, "Find", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_ai, android.R.drawable.ic_menu_send, StudioUi.ActivePurple, "AI", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_git, android.R.drawable.ic_menu_upload, StudioUi.ActiveRed, "Git", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_terminal_toolbar, android.R.drawable.ic_menu_myplaces, StudioUi.ActiveGreen, "Terminal", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_logcat, android.R.drawable.ic_menu_info_details, StudioUi.ActiveAmber, "Logcat", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_run_config, android.R.drawable.ic_menu_manage, StudioUi.ActiveBlue, "Run Config", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_device, android.R.drawable.ic_menu_mapmode, "#56B6C2", "Device", 28))
-            addView(quickDivider())
-            addView(iconButton(R.id.btn_settings_toolbar, android.R.drawable.ic_menu_preferences, StudioUi.InactiveIcon, "Settings", 28))
-        })
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32))
-    }
-}
-
-private fun Context.quickDivider(): View {
-    return View(this).apply {
-        setBackgroundColor(c(StudioUi.Divider))
-        layoutParams = LinearLayout.LayoutParams(dp(1), dp(18)).apply {
-            marginStart = dp(2)
-            marginEnd = dp(2)
-        }
-    }
-}
-
-private fun Context.buildBuildToolbar(): View {
-    return LinearLayout(this).apply {
-        id = R.id.build_icon_toolbar
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        visibility = View.GONE
-        setPadding(dp(6), 0, dp(6), 0)
-        setBackgroundColor(c(StudioUi.Surface))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
-        addView(iconButton(R.id.btn_rebuild, android.R.drawable.ic_menu_upload, StudioUi.ActiveAmber, "Rebuild", 32))
-        addView(quickDivider())
-        addView(iconButton(R.id.btn_stop, android.R.drawable.ic_media_pause, "#FF7B72", "Stop", 32))
-        addView(quickDivider())
-        addView(iconButton(R.id.btn_install_apk, android.R.drawable.stat_sys_download_done, StudioUi.ActiveBlue, "Install APK", 32))
-        addView(quickDivider())
-        addView(iconButton(R.id.btn_tools, android.R.drawable.ic_menu_preferences, StudioUi.ActivePurple, "Build Tools", 32))
-        addView(View(this@buildBuildToolbar), LinearLayout.LayoutParams(0, 1, 1f))
-        addView(ProgressBar(this@buildBuildToolbar).apply {
+        // Right: build progress indicator (moved up from the deleted build toolbar;
+        // setBuildRunning() in MainActivity depends on this id being present)
+        addView(ProgressBar(this@buildPrimaryToolbar).apply {
             id = R.id.build_progress
             visibility = View.INVISIBLE
             layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
         })
+
+        // Hidden placeholder: MainActivity still drives btn_preview visibility
+        // (updatePreviewButtonVisibility) and its click handler, so this one id
+        // must keep a view in the tree. Everything else was dead code and went
+        // away together with its handler.
+        addView(hiddenIcon(R.id.btn_preview))
     }
 }
 
@@ -586,6 +508,9 @@ private fun Context.buildWelcomeScreen(): View {
     return ScrollView(this).apply {
         id = R.id.welcome_screen
         setBackgroundColor(c(StudioUi.Ink))
+        // 오른쪽 가장자리에 스크롤바 두께만큼 흰 줄이 보이던 것 제거
+        isVerticalScrollBarEnabled = false
+        isScrollbarFadingEnabled = false
         addView(LinearLayout(this@buildWelcomeScreen).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(26), dp(24), dp(24))
@@ -668,14 +593,16 @@ private fun Context.buildWelcomeScreen(): View {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
                 setPadding(0, 0, 0, dp(22))
-                addView(actionButton(R.id.btn_new_project, "New Project", "#4F8EF7", "#FFFFFF"))
-                addView(actionButton(R.id.btn_open_project, "Open Project", "#1D222B", "#DCE3EE"))
-                addView(actionButton(R.id.btn_ai_welcome, "AI", "#B57CE7", "#FFFFFF").apply {
+                // 하드코딩된 hex는 테마 리맵 대상이 아니어서 밝은 테마에서
+                // "어두운 글자 + 어두운 배경"이 된다. 반드시 시맨틱 팔레트 상수를 쓴다.
+                addView(actionButton(R.id.btn_new_project, "New Project", StudioUi.Blue, "#FFFFFF"))
+                addView(actionButton(R.id.btn_open_project, "Open Project", StudioUi.Card2, StudioUi.Text))
+                addView(actionButton(R.id.btn_ai_welcome, "AI", StudioUi.Purple, "#FFFFFF").apply {
                     setOnClickListener { (context as? MainActivity)?.launchAiAssistant() }
                 })
             })
             addView(TextView(this@buildWelcomeScreen).apply {
-                text = "Recent Projects"
+                text = AppLanguage.literal(this@buildWelcomeScreen, "Recent Projects")
                 textSize = 11f
                 typeface = Typeface.MONOSPACE
                 setTextColor(c("#8E99AC"))
@@ -689,7 +616,7 @@ private fun Context.buildWelcomeScreen(): View {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             })
             addView(TextView(this@buildWelcomeScreen).apply {
-                text = "Recent Files"
+                text = AppLanguage.literal(this@buildWelcomeScreen, "Recent Files")
                 textSize = 11f
                 typeface = Typeface.MONOSPACE
                 setTextColor(c("#8E99AC"))
@@ -727,45 +654,43 @@ private fun Context.buildEditorContainer(): View {
                 gravity = Gravity.CENTER_VERTICAL
                 background = StudioUi.rounded(this@buildEditorContainer, fill = StudioUi.LayerToolbar, stroke = "#00000000", radiusDp = 0)
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32))
-                // Shell toggle button
+                // 편집기 툴바도 상단과 같은 규칙: 아이콘은 단일 톤, 의미가 겹치지 않게 아이콘 분리.
+                // (기존: Command Palette 와 AI Chat 이 둘 다 wrench 를 썼다)
                 addView(ImageButton(this@buildEditorContainer).apply {
                     id = R.id.btn_shell_toggle
                     setImageResource(android.R.drawable.ic_menu_sort_by_size)
-                    background = null
+                    background = StudioUi.ripple(this@buildEditorContainer, StudioUi.rounded(this@buildEditorContainer, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusXl))
                     setPadding(dp(6), dp(4), dp(6), dp(4))
-                    setColorFilter(c(StudioUi.ActivePurple))
+                    setColorFilter(c(StudioUi.TextSoft))
                     setOnClickListener { (context as? MainActivity)?.toggleShellFromEditor() }
-                    contentDescription = "Shell"
+                    contentDescription = AppLanguage.literal(this@buildEditorContainer, "Shell")
                 }, LinearLayout.LayoutParams(dp(32), dp(32)))
-                // Command Palette button
                 addView(ImageButton(this@buildEditorContainer).apply {
                     id = R.id.btn_command_palette
-                    setImageResource(android.R.drawable.ic_menu_manage)
-                    background = null
+                    setImageResource(R.drawable.ic_menu)
+                    background = StudioUi.ripple(this@buildEditorContainer, StudioUi.rounded(this@buildEditorContainer, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusXl))
                     setPadding(dp(6), dp(4), dp(6), dp(4))
-                    setColorFilter(c(StudioUi.ActiveAmber))
+                    setColorFilter(c(StudioUi.TextSoft))
                     setOnClickListener { (context as? MainActivity)?.showCommandPalette() }
-                    contentDescription = "Command Palette"
+                    contentDescription = AppLanguage.literal(this@buildEditorContainer, "Command Palette")
                 }, LinearLayout.LayoutParams(dp(32), dp(32)))
-                // AI Chat button
                 addView(ImageButton(this@buildEditorContainer).apply {
                     id = R.id.btn_ai_chat
-                    setImageResource(android.R.drawable.ic_menu_manage)
-                    background = null
+                    setImageResource(R.drawable.ic_ai)
+                    background = StudioUi.ripple(this@buildEditorContainer, StudioUi.rounded(this@buildEditorContainer, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusXl))
                     setPadding(dp(6), dp(4), dp(6), dp(4))
-                    setColorFilter(c(StudioUi.ActiveBlue))
+                    setColorFilter(c(StudioUi.TextSoft))
                     setOnClickListener { (context as? MainActivity)?.openAiChatFromEditor() }
-                    contentDescription = "Open AI Chat"
+                    contentDescription = AppLanguage.literal(this@buildEditorContainer, "Open AI Chat")
                 }, LinearLayout.LayoutParams(dp(32), dp(32)))
-                // Find/Replace inline toggle
                 addView(ImageButton(this@buildEditorContainer).apply {
                     id = R.id.btn_find_inline
                     setImageResource(android.R.drawable.ic_menu_search)
-                    background = null
+                    background = StudioUi.ripple(this@buildEditorContainer, StudioUi.rounded(this@buildEditorContainer, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusXl))
                     setPadding(dp(6), dp(4), dp(6), dp(4))
-                    setColorFilter(c(StudioUi.ActiveBlue))
+                    setColorFilter(c(StudioUi.TextSoft))
                     setOnClickListener { (context as? MainActivity)?.toggleFindReplaceInline() }
-                    contentDescription = "Find/Replace"
+                    contentDescription = AppLanguage.literal(this@buildEditorContainer, "Find/Replace")
                 }, LinearLayout.LayoutParams(dp(32), dp(32)))
                 // Breadcrumb
                 addView(HorizontalScrollView(this@buildEditorContainer).apply {
@@ -1970,7 +1895,7 @@ private fun Context.actionButton(
 ): Button {
     return Button(this).apply {
         id = viewId
-        text = label
+        text = AppLanguage.literal(this@actionButton, label)
         textSize = 11f
         studioButton(fill = bg, text = fg, accent = StudioUi.ButtonBorder, radiusDp = StudioUi.RadiusMd)
         StudioUi.enforceMinTouchTarget(this)

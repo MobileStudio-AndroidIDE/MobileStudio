@@ -341,7 +341,12 @@ class TerminalEmulator(
                 when (mode) {
                     0 -> eraseFromCursorToEnd()
                     1 -> eraseFromStartToCursor()
-                    2 -> eraseAll()
+                    // Full-screen erases (what `clear` emits) also drop the
+                    // scrollback. Desktop terminals keep it, but on a phone the
+                    // leftover command line sitting directly above the freshly
+                    // drawn prompt reads as merged text ("clearls") -- the exact
+                    // report this fixes. Mode 2 and 3 both mean "empty screen".
+                    2 -> { eraseAll(); scrollBackBuffer.clear() }
                     3 -> { eraseAll(); scrollBackBuffer.clear() }
                 }
             }

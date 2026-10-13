@@ -707,7 +707,17 @@ class PersistentShell(
                 while (off < bytes.size) {
                     val n = p.writeBytes(bytes, off, bytes.size - off)
                     Log.d(TAG, "sendRaw len=${bytes.size} off=$off n=$n")
-                    if (n <= 0) return false // stalled or closed mid-write
+                    if (n <= 0) {
+                        // Stalled mid-write. Park the unwritten remainder so it
+                        // is delivered once the PTY drains instead of being
+                        // dropped -- a lost Enter leaves the previous command
+                        // sitting on the shell's input line, and the next
+                        // command is then appended to it on screen.
+                        if (off < bytes.size) {
+                            pendingWrites.addLast(text.substring(off))
+                        }
+                        return false
+                    }
                     off += n
                 }
                 true

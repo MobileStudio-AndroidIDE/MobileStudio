@@ -349,14 +349,9 @@ class ApkSigningActivity : AppCompatActivity() {
         } catch (_: Exception) {}
     }
 
-    private fun findApkFiles(): List<File> {
-        val apkDir = File(projectDir, "app/build/outputs/apk")
-        if (!apkDir.exists()) return emptyList()
-        return apkDir.walkTopDown()
-            .filter { it.isFile && it.extension == "apk" }
-            .sortedByDescending { it.lastModified() }
-            .toList()
-    }
+    private fun findApkFiles(): List<File> = BuildApkLocator.allInstallableApks(
+        File(projectDir, "app/build/outputs/apk")
+    )
 
     private fun makeInfoRow(label: String, value: String): View {
         return LinearLayout(this).apply {
