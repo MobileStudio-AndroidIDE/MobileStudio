@@ -9115,6 +9115,15 @@ if (name == "logcat") {
 
     }
 
+    /**
+     * Marks the visible panel's tab.
+     *
+     * It draws the same bordered chip the layout factory draws for the tab
+     * that is selected at startup. It used to paint a flat fill instead, so
+     * the border disappeared on the first switch and how the active tab looked
+     * depended on how you had got there. The colours come from the same
+     * tokens for the same reason.
+     */
     private fun highlightPanelTab(name: String) {
         val tabId = when (name) {
             "build" -> R.id.tab_build
@@ -9126,12 +9135,12 @@ if (name == "logcat") {
             else -> return
         }
         val color = when (name) {
-            "build" -> "#98C379"
-            "logcat" -> "#E5C07B"
-            "problems" -> "#E06C75"
-            "search" -> "#61AFEF"
-            "shell" -> "#C678DD"
-            else -> "#4F8EF7"
+            "build" -> StudioUi.ActiveGreen
+            "logcat" -> StudioUi.ActiveAmber
+            "problems" -> StudioUi.ActiveRed
+            "search" -> StudioUi.ActiveBlue
+            "shell" -> StudioUi.ActivePurple
+            else -> StudioUi.ActiveBlue
         }
         val tabIds = listOf(
             R.id.tab_build, R.id.tab_logcat, R.id.tab_problems,
@@ -9141,9 +9150,14 @@ if (name == "logcat") {
             val tab = findViewById<TextView>(id) ?: return@forEach
             if (id == tabId) {
                 tab.setTextColor(StudioUi.color(color))
-                tab.setBackgroundColor(StudioUi.color(StudioUi.Surface2))
+                tab.background = StudioUi.rounded(
+                    this,
+                    fill = StudioUi.Surface2,
+                    stroke = color,
+                    radiusDp = StudioUi.RadiusMd,
+                )
             } else {
-                tab.setTextColor(StudioUi.color(StudioUi.Muted))
+                tab.setTextColor(StudioUi.color(StudioUi.InactiveIcon))
                 tab.setBackgroundColor(Color.TRANSPARENT)
             }
         }
