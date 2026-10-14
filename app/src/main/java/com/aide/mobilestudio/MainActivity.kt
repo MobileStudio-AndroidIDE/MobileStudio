@@ -4795,6 +4795,13 @@ Long press: Toggle Shell panel"""
         }
         syncBottomPanelToggleRotation(expanded = false, animate = false)
 
+        // The grabber is the panel's only handle while it is collapsed, so it
+        // toggles the same panel and flips its glyph to show which way the next
+        // press will move it.
+        findViewById<View>(R.id.shell_grabber)?.setOnClickListener {
+            if (bottomPanel.visibility == View.VISIBLE) hideBottomPanel() else showBottomPanel()
+        }
+
         // Drag resize. The panel sits below the editor in portrait and beside
         // it in landscape, so the handle adjusts its height or its width. The
         // direction is read from the panel's own layout params rather than the
@@ -8866,6 +8873,23 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             } else {
                 button.rotation = target
             }
+        }
+        // The grabber is the panel's only handle while it is collapsed, so it
+        // tracks the same state and turns around with it.
+        val grabberIcon = findViewById<TextView>(R.id.shell_grabber_icon)
+        val base = if (resources.configuration.orientation ==
+            android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        ) -90f else 0f
+        val grabberTarget = if (expanded) base + 180f else base
+        grabberIcon?.animate()?.cancel()
+        if (animate && grabberIcon != null) {
+            grabberIcon.animate()
+                .rotation(grabberTarget)
+                .setDuration(StudioUi.AnimFast)
+                .setInterpolator(StudioUi.DefaultInterpolator)
+                .start()
+        } else {
+            grabberIcon?.rotation = grabberTarget
         }
     }
 

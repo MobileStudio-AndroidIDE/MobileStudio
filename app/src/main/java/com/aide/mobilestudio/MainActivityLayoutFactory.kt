@@ -551,6 +551,7 @@ private fun Context.buildWorkspaceArea(): View {
                 id = R.id.panel_divider
                 setBackgroundColor(c(StudioUi.Divider))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            addView(buildPanelGrabber(landscape = false))
             addView(buildBottomPanel())
         }
     }
@@ -568,12 +569,64 @@ private fun Context.buildWorkspaceArea(): View {
             id = R.id.panel_divider
             setBackgroundColor(c(StudioUi.Divider))
         }, LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
+        addView(buildPanelGrabber(landscape = true))
         addView(buildBottomPanel(), LinearLayout.LayoutParams(
             landscapePanelWidth(),
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
     }
 }
+
+/**
+ * The handle that pulls the bottom panel up and lets it back down.
+ *
+ * It sits directly against the panel's leading edge as a sibling rather than a
+ * child of it, so it is still on screen while the panel is collapsed - the only
+ * way a collapsed panel stays reachable - and it rides that edge as the edge
+ * animates in. No separate animation is needed: the panel's own height
+ * animation carries the handle with it.
+ *
+ * The glyph points the way the panel travels, and flips once the panel is out,
+ * so the direction of the next press is always what is shown.
+ */
+private fun Context.buildPanelGrabber(landscape: Boolean): View {
+    val icon = TextView(this).apply {
+        id = R.id.shell_grabber_icon
+        text = "^"
+        textSize = 13f
+        gravity = Gravity.CENTER
+        setTextColor(c(StudioUi.TextSoft))
+        rotation = if (landscape) -90f else 0f
+    }
+    return FrameLayout(this).apply {
+        id = R.id.shell_grabber
+        background = StudioUi.rounded(
+            this@buildPanelGrabber,
+            fill = StudioUi.Surface2,
+            stroke = StudioUi.Border,
+            radiusDp = 8,
+        )
+        addView(
+            icon,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        isClickable = true
+        isFocusable = true
+        contentDescription =
+            if (landscape) "Show or hide the side panel" else "Show or hide the bottom panel"
+        layoutParams = if (landscape) {
+            LinearLayout.LayoutParams(dp(PANEL_GRABBER_SIZE_DP), ViewGroup.LayoutParams.MATCH_PARENT)
+        } else {
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(PANEL_GRABBER_SIZE_DP))
+        }
+    }
+}
+
+/** Thickness of the panel grabber; also its touch target. */
+private const val PANEL_GRABBER_SIZE_DP = 28
 
 /** Share of the screen width the build-output panel takes in landscape. */
 private fun Context.landscapePanelWidth(): Int {
