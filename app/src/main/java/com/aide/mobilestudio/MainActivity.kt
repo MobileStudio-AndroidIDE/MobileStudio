@@ -4274,23 +4274,51 @@ Long press: Toggle Shell panel"""
                 setTextColor(Color.parseColor(info.color))
                 setPadding(0, 0, 4.dp(), 0)
             }
+            // An unsaved file is marked with a dot of its own rather than a
+            // prefix. Prefixing shifted the name by a character the moment a
+            // file was edited, so the whole row slid sideways while typing.
+            val unsavedDot = if (isUnsaved) {
+                TextView(this).apply {
+                    text = "\u25CF"
+                    textSize = 7f
+                    setTextColor(StudioUi.color(StudioUi.Amber))
+                    gravity = Gravity.CENTER
+                    setPadding(0, 0, 5.dp(), 0)
+                }
+            } else {
+                null
+            }
             val tvName = TextView(this).apply {
-                text = if (isUnsaved) "\u2022 ${file.name}" else file.name
-                textSize = 11.5f; typeface = Typeface.create("monospace", Typeface.NORMAL)
+                text = file.name
+                textSize = StudioUi.TypeSmall
+                typeface = Typeface.create("monospace", Typeface.NORMAL)
                 setTextColor(if (isActive) StudioUi.palette.text else StudioUi.palette.textSoft)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 maxWidth = 140.dp()
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 0, 6.dp(), 0)
                 setOnClickListener { openFile(file) }
             }
+            // Close keeps a fixed box with its own hit area, so it lines up
+            // down the row and can be pressed without aiming at a glyph a few
+            // pixels wide - the usual cost of a bare "\u2715" in a tab.
             val btnClose = TextView(this).apply {
-                text = "\u2715"; textSize = 14f
-                setTextColor(StudioUi.palette.muted)
-                setPadding(8.dp(), 2.dp(), 8.dp(), 2.dp())
+                text = "\u2715"
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setTextColor(if (isActive) StudioUi.palette.textSoft else StudioUi.palette.muted)
+                layoutParams = LinearLayout.LayoutParams(32.dp(), LinearLayout.LayoutParams.MATCH_PARENT)
+                background = StudioUi.ripple(
+                    this@MainActivity,
+                    StudioUi.rounded(this@MainActivity, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusMd),
+                )
                 setOnClickListener { closeTab(file) }
             }
-            content.addView(tvIcon); content.addView(tvName); content.addView(btnClose)
+            content.addView(tvIcon)
+            unsavedDot?.let { content.addView(it) }
+            content.addView(tvName)
+            content.addView(btnClose)
             tab.addView(content)
             
             // Long press context menu
@@ -4299,12 +4327,11 @@ Long press: Toggle Shell panel"""
                 true
             }
             
-            // Right separator
+            // A full-height hairline rather than a short stub, so the tabs
+            // read as a row of tabs instead of floating near each other.
             val sep = View(this).apply {
-                setBackgroundColor(Color.parseColor("#2C313A"))
-                layoutParams = LinearLayout.LayoutParams(1, 16.dp()).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                }
+                setBackgroundColor(StudioUi.color(StudioUi.Border))
+                layoutParams = LinearLayout.LayoutParams(1, LinearLayout.LayoutParams.MATCH_PARENT)
             }
             tabContainer.addView(tab)
             tabContainer.addView(sep)

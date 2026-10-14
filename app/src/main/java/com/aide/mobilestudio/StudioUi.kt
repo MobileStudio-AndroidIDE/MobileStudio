@@ -448,6 +448,87 @@ object StudioUi {
             background = GradientDrawable().apply { setColor(color(tint)) }
         }
 
+    // ── Type scale ────────────────────────────────────────────────────────
+    //
+    // Sp sizes only. Screens used to pick whatever looked right in place, so
+    // the same role read at three different sizes depending on which panel
+    // you were in, and nothing looked quite aligned with the thing beside it.
+
+    /** Dense metadata: file sizes, timestamps, counts in a status line. */
+    const val TypeCaption = 10f
+
+    /** Controls that carry a label in a tight row: tabs, chips, small buttons. */
+    const val TypeSmall = 11f
+
+    /** Default reading size for body text and list rows. */
+    const val TypeBody = 13f
+
+    /** Section and dialog titles. */
+    const val TypeTitle = 15f
+
+    /** Screen headings and empty-state titles. */
+    const val TypeHeading = 18f
+
+    /**
+     * The view a panel shows when it has nothing to show.
+     *
+     * A blank panel leaves the reader unable to tell "nothing has happened
+     * yet" from "this is broken", and gives no hint of what would put
+     * something here. Every list and output surface gets one instead of an
+     * empty rectangle.
+     */
+    fun emptyState(
+        context: Context,
+        glyph: String,
+        title: String,
+        hint: String,
+        actionLabel: String? = null,
+        onAction: (() -> Unit)? = null
+    ): View = android.widget.LinearLayout(context).apply {
+        orientation = android.widget.LinearLayout.VERTICAL
+        gravity = android.view.Gravity.CENTER
+        setPadding(dp(context, SpacingXl), dp(context, SpacingXl), dp(context, SpacingXl), dp(context, SpacingXl))
+        addView(android.widget.TextView(context).apply {
+            text = glyph
+            textSize = 26f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(color(Muted))
+        })
+        addView(android.widget.TextView(context).apply {
+            text = title
+            textSize = TypeBody
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = android.view.Gravity.CENTER
+            setTextColor(color(TextSoft))
+            setPadding(0, dp(context, SpacingSm), 0, 0)
+        })
+        addView(android.widget.TextView(context).apply {
+            text = hint
+            textSize = TypeCaption
+            gravity = android.view.Gravity.CENTER
+            setTextColor(color(Muted))
+            setPadding(0, dp(context, SpacingXs), 0, 0)
+        })
+        if (actionLabel != null && onAction != null) {
+            addView(ripple(context, rounded(context, fill = Surface2, stroke = Border, radiusDp = RadiusMd)).let {
+                android.widget.Button(context).apply {
+                    text = actionLabel
+                    textSize = TypeSmall
+                    setTextColor(color(Blue))
+                    background = it
+                    minimumHeight = 0
+                    setPadding(dp(context, SpacingLg), dp(context, SpacingXs), dp(context, SpacingLg), dp(context, SpacingXs))
+                    setOnClickListener { onAction() }
+                    enforceMinTouchTarget(this)
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = dp(context, SpacingMd) }
+                }
+            })
+        }
+    }
+
     fun tab(context: Context, text: String, selected: Boolean): TextView =
         TextView(context).apply {
             this.text = text

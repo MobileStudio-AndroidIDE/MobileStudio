@@ -1963,7 +1963,7 @@ private fun Context.panelTab(viewId: Int, label: String, selected: Boolean = fal
     return TextView(this).apply {
         id = viewId
         text = if (iconOnly) iconMap[viewId] ?: label else AppLanguage.literal(this@panelTab, label)
-        textSize = 11f
+        textSize = StudioUi.TypeSmall
         gravity = Gravity.CENTER
         setTextColor(c(if (selected) iconColor else StudioUi.InactiveIcon))
         if (selected) {
