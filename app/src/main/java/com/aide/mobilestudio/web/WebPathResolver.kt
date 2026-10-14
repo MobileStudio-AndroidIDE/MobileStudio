@@ -91,4 +91,27 @@ object WebPathResolver {
     }
 
     private val SCHEMES = listOf("data:", "blob:", "javascript:", "mailto:", "about:", "tel:", "file:")
+
+    /** Content type the local interceptor serves for a file path. */
+    fun mimeTypeFor(path: String): String {
+        val name = path.substringAfterLast('/').lowercase()
+        return when {
+            name.endsWith(".html") || name.endsWith(".htm") -> "text/html"
+            name.endsWith(".css") -> "text/css"
+            name.endsWith(".js") || name.endsWith(".mjs") -> "text/javascript"
+            name.endsWith(".json") -> "application/json"
+            name.endsWith(".svg") -> "image/svg+xml"
+            name.endsWith(".png") -> "image/png"
+            name.endsWith(".jpg") || name.endsWith(".jpeg") -> "image/jpeg"
+            name.endsWith(".webp") -> "image/webp"
+            name.endsWith(".gif") -> "image/gif"
+            name.endsWith(".ico") -> "image/x-icon"
+            name.endsWith(".woff") -> "font/woff"
+            name.endsWith(".woff2") -> "font/woff2"
+            name.endsWith(".ttf") -> "font/ttf"
+            name.endsWith(".otf") -> "font/otf"
+            name.endsWith(".txt") || name.endsWith(".md") -> "text/plain"
+            else -> "application/octet-stream"
+        }
+    }
 }

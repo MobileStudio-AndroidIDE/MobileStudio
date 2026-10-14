@@ -174,6 +174,7 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     }
 
     private lateinit var autoComplete: KotlinAutoComplete
+    private lateinit var webAutoComplete: com.aide.mobilestudio.web.WebAutoComplete
     private lateinit var problemsAdapter: ProblemsAdapter
     private val editorPairs = mapOf('(' to ')', '[' to ']', '{' to '}', '"' to '"')
     private var ctrlSymbolHighlightSpans: List<Any> = emptyList()
@@ -955,6 +956,8 @@ Long press: Toggle Shell panel"""
         scope.cancel()
         fileWatcher?.stop()
         volumeGestureHandler.destroy()
+        // Web completions hold a TextWatcher and a coroutine scope on the editor.
+        if (::webAutoComplete.isInitialized) runCatching { webAutoComplete.detach() }
     }
 
     @Deprecated("Deprecated in Java")
@@ -1653,15 +1656,31 @@ Long press: Toggle Shell panel"""
     }
 
     private fun openCurrentPreview(file: File) {
-        if (file.extension.lowercase() != "xml") {
-            if (file.extension.lowercase() == "kt" && runCatching { file.readText().contains("@Preview") }.getOrDefault(false)) {
+        val extension = file.extension.lowercase()
+        when (extension) {
+            "xml" -> LayoutPreviewActivity.start(this, file)
+            "html", "htm" -> com.aide.mobilestudio.web.HtmlPreviewActivity.start(this, file)
+            "kt" -> if (runCatching { file.readText().contains("@Preview") }.getOrDefault(false)) {
                 ComposePreviewActivity.start(this, file)
             } else {
-                showToast("Preview is available for XML layouts and Kotlin @Preview files")
+                showToast("Preview is available for XML layouts, HTML pages and Kotlin @Preview files")
             }
-            return
+            // A stylesheet or script is only rendered as part of a page, so
+            // point at the page that pulls it in rather than pretending to
+            // preview it on its own.
+            "css", "js", "mjs", "ts" -> {
+                val page = runCatching {
+                    file.parentFile?.listFiles()
+                        ?.firstOrNull { it.isFile && it.extension.lowercase() in listOf("html", "htm") }
+                }.getOrNull()
+                if (page != null) {
+                    com.aide.mobilestudio.web.HtmlPreviewActivity.start(this, page)
+                } else {
+                    showToast("Open the HTML page that uses $extension files to preview it")
+                }
+            }
+            else -> showToast("Preview is available for XML layouts, HTML pages and Kotlin @Preview files")
         }
-        LayoutPreviewActivity.start(this, file)
     }
 
     private fun showComposePreviewSummary(file: File) {
@@ -2308,6 +2327,7 @@ Long press: Toggle Shell panel"""
             // ESC key ??close autocomplete, close find panel, deselect
             if (keyCode == KeyEvent.KEYCODE_ESCAPE) {
                 autoComplete.dismiss()
+                webAutoComplete.dismiss()
                 if (findReplaceVisible) { hideFindReplace(); return@setOnKeyListener true }
                 codeEditor.setSelection(codeEditor.selectionStart)
                 vibrate(15)
@@ -3638,6 +3658,7 @@ Long press: Toggle Shell panel"""
                 }
                 currentProjectDir?.let { autoComplete.setProjectDir(it) }
                 autoComplete.setCurrentFile(file)
+                webAutoComplete.setCurrentFile(file)
 
                 // Notify analysis engine of file open
                 currentProjectDir?.let { projDir ->
@@ -7600,6 +7621,7 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         )
         problemsRecycler.adapter = problemsAdapter
         autoComplete = KotlinAutoComplete(this, codeEditor)
+        webAutoComplete = com.aide.mobilestudio.web.WebAutoComplete(this, codeEditor)
 
         KotlinHighlighter.attachTo(codeEditor, currentFile?.absolutePath) { errors ->
             val extension = currentFile?.extension?.lowercase()

@@ -105,6 +105,11 @@
             android:windowSoftInputMode="stateHidden" />
 
         <activity
+            android:name=".web.HtmlPreviewActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".AndroidShellActivity"
             android:exported="false"
             android:screenOrientation="unspecified"
