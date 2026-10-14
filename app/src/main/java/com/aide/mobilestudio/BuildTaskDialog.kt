@@ -23,14 +23,53 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
     private var selectedVariant: String = "debug"
     private var selectedFlavor: String = ""
 
+    internal companion object {
+        /** Index of "Clean" in the build-type row; it is a task, not a suffix. */
+        const val CLEAN_BUILD_TYPE_INDEX = 2
+
+        /**
+         * Splits the editable command line into Gradle arguments.
+         *
+         * The `./gradlew` prefix is shown but fixed; everything after it is
+         * the user's, so a one-off `clean assembleDebug --offline` or
+         * `app:test` can be typed without adding an option for it. Quotes
+         * keep an argument that holds a space together instead of splitting
+         * it, which is what makes `-Pname="a b"` usable.
+         */
+        fun parseCommandArgs(line: String): List<String> {
+            val args = mutableListOf<String>()
+            val current = StringBuilder()
+            var quote: Char? = null
+
+            for (ch in line) {
+                when {
+                    ch == '\'' || ch == '"' -> {
+                        if (quote == null) quote = ch
+                        else if (quote == ch) quote = null
+                        else current.append(ch)
+                    }
+                    ch.isWhitespace() && quote == null -> {
+                        if (current.isNotEmpty()) {
+                            args += current.toString()
+                            current.setLength(0)
+                        }
+                    }
+                    else -> current.append(ch)
+                }
+            }
+            if (current.isNotEmpty()) args += current.toString()
+            return args
+        }
+    }
+
     fun show(
         currentTask: String? = null,
         currentFlag: String? = null,
         isBuildRunning: Boolean = false,
         gradleSyncNeeded: Boolean = false,
         variants: List<Pair<String, String>> = emptyList(), // (variantName, flavor) pairs
-        onRun: (task: String, flag: String) -> Unit,
-        onRunBackground: (task: String, flag: String) -> Unit,
+        onRun: (args: List<String>) -> Unit,
+        onRunBackground: (args: List<String>) -> Unit,
         onStop: () -> Unit
     ) {
         val isKorean = AppLanguage.isKorean(activity)
@@ -75,7 +114,7 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
                 }
                 setOnClickListener {
                     val flag = getSelectedFlag()
-                    onRun(task, flag)
+                    onRun(if (flag == "none") listOf(task) else listOf(task, flag))
                 }
             }
             quickRow.addView(btn)
@@ -132,8 +171,8 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
         }
         var selectedBuildType = buildTypeValues.indexOf(
             when {
-                currentTask?.contains("Release") == true -> "release"
-                currentTask?.contains("Clean") == true -> "clean"
+                currentTask?.contains("Release", ignoreCase = true) == true -> "release"
+                currentTask == "clean" -> "clean"
                 else -> "debug"
             }
         ).coerceAtLeast(0)
@@ -223,16 +262,37 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
         }
         root.addView(flagRadioGroup)
 
-        // ???? Preview Command ????????????????????????????????????????????????????????????????????????????
-        val previewText = TextView(activity).apply {
+        // ???? Command ?????????????????????????????????????????????????????????????????????????????????????
+        // The prefix is fixed and the rest is the user's: the radios seed it,
+        // but anything after ./gradlew can be typed directly, so a one-off
+        // "clean assembleDebug --offline" needs no new option here.
+        root.addView(sectionLabel(if (isKorean) "실행 명령" else "Command"))
+
+        val commandRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = StudioUi.rounded(activity, fill = StudioUi.Ink, stroke = StudioUi.Border, radiusDp = 6)
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        commandRow.addView(TextView(activity).apply {
             typeface = Typeface.MONOSPACE
             textSize = 11f
             setTextColor(StudioUi.color(StudioUi.TextSoft))
-            background = StudioUi.rounded(activity, fill = StudioUi.Ink, stroke = StudioUi.Border, radiusDp = 6)
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            text = ""
+            text = "./gradlew "
+        })
+        val commandInput = EditText(activity).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            setTextColor(StudioUi.color(StudioUi.Text))
+            setSingleLine(true)
+            background = null
+            setPadding(0, 0, 0, 0)
+            gravity = Gravity.START
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         }
-        root.addView(previewText)
+        commandRow.addView(commandInput)
+        root.addView(commandRow)
 
         // ???? Background Status ????????????????????????????????????????????????????????????????????????
         val bgStatus = GradleBuildService.status(activity)
@@ -281,14 +341,33 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
             val updatePreview = {
                 val task = composeTask(selectedBuildType, selectedTaskType)
                 val flag = flags[selectedFlagIndex]
-                val cmd = "./gradlew $task${if (flag != "none") " $flag" else ""}"
-                previewText.text = cmd
+                commandInput.setText(task + if (flag != "none") " $flag" else "")
+                commandInput.setSelection(commandInput.text.length)
             }
             updatePreview()
 
             radioGroup.setOnCheckedChangeListener { _, _ -> updatePreview() }
             taskRadioGroup.setOnCheckedChangeListener { _, _ -> updatePreview() }
             flagRadioGroup.setOnCheckedChangeListener { _, _ -> updatePreview() }
+
+            /*
+             * The radios seed the command line; after that it is the user's.
+             * Reading it back here rather than recomposing from the radios
+             * is what makes a typed one-off work.
+             */
+            val editedArgs = {
+                val args = parseCommandArgs(commandInput.text.toString())
+                if (args.isEmpty()) {
+                    Toast.makeText(
+                        activity,
+                        if (isKorean) "실행할 명령어를 입력하세요" else "Enter a command to run",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    null
+                } else {
+                    args
+                }
+            }
 
             dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
                 if (isBuildRunning) {
@@ -297,17 +376,15 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
                         Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                val task = composeTask(selectedBuildType, selectedTaskType)
-                val flag = flags[selectedFlagIndex]
+                val args = editedArgs() ?: return@setOnClickListener
                 dialog.dismiss()
-                onRun(task, flag)
+                onRun(args)
             }
 
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setOnClickListener {
-                val task = composeTask(selectedBuildType, selectedTaskType)
-                val flag = flags[selectedFlagIndex]
+                val args = editedArgs() ?: return@setOnClickListener
                 dialog.dismiss()
-                onRunBackground(task, flag)
+                onRunBackground(args)
             }
 
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
@@ -319,8 +396,18 @@ class BuildTaskDialog(private val activity: AppCompatActivity) {
         dialog.show()
     }
 
+    /**
+     * The task list shown to the user and handed to Gradle.
+     *
+     * "Clean" is a task in its own right. It used to fall into the build-type
+     * slot as an empty suffix, which turned the whole selection into plain
+     * "assemble" - so choosing Clean built without cleaning, and the only
+     * clue was a build that failed on stale output.
+     */
     private fun composeTask(buildTypeIndex: Int, taskTypeIndex: Int): String {
-        val buildType = if (buildTypeIndex == 0) "Debug" else if (buildTypeIndex == 1) "Release" else ""
+        if (buildTypeIndex == CLEAN_BUILD_TYPE_INDEX) return "clean"
+
+        val buildType = if (buildTypeIndex == 0) "Debug" else "Release"
         val flavorPrefix = selectedFlavor.replaceFirstChar { it.uppercase() }
 
         return when (taskTypeIndex) {

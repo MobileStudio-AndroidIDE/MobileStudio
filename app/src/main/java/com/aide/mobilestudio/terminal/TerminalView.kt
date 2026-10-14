@@ -636,7 +636,7 @@ class TerminalView @JvmOverloads constructor(
                      *
                      * The shell/PTY produces the terminal output.
                      */
-                    currentSession.sendRaw("\n")
+                    currentSession.sendRaw(ENTER_KEY)
 
                     return true
                 }
@@ -798,7 +798,7 @@ class TerminalView @JvmOverloads constructor(
 
             endInputLine()
 
-            session?.sendRaw("\n")
+            session?.sendRaw(ENTER_KEY)
 
             dismissCompletion()
 
@@ -978,7 +978,7 @@ class TerminalView @JvmOverloads constructor(
                 /*
                  * No localEcho().
                  */
-                currentSession.sendRaw("\n")
+                currentSession.sendRaw(ENTER_KEY)
 
                 return true
             }
@@ -1292,7 +1292,7 @@ class TerminalView @JvmOverloads constructor(
 
         endInputLine()
 
-        session?.sendRaw("\n")
+        session?.sendRaw(ENTER_KEY)
     }
 
     fun keyBarBackspace() {
@@ -3316,6 +3316,23 @@ class TerminalView @JvmOverloads constructor(
          * text the user types never collide, even at the narrowest width.
          */
         private const val PROMPT_TYPED_COLUMNS_RESERVED = 8
+
+        /**
+         * What the Enter key puts on the PTY.
+         *
+         * CR, not LF. A terminal's Enter has always been carriage return, and
+         * the kernel's ICRNL is what turned it into the newline the shell
+         * sees. Any program that puts the tty in raw mode - which it does by
+         * switching ICANON off - loses that translation and reads the byte as
+         * it arrives, so it must be the CR it is written to expect.
+         *
+         * Sending LF here meant the shell was fine while every interactive
+         * prompt was not: `gh auth login`, `less`, `vim` and any Y/n confirm
+         * read the key, see something that is not their enter, and ignore it.
+         * The keys around it - arrows, y, n - still worked, which is what made
+         * it look like a broken shell rather than one wrong byte.
+         */
+        private const val ENTER_KEY = "\r"
 
         /** Key codes with no Ctrl mapping: they release the latch. */
         private val CTRL_RELEASE_KEYCODES = setOf(

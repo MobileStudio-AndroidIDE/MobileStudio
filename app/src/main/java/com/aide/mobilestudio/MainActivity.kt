@@ -5146,17 +5146,19 @@ Long press: Toggle Shell panel"""
             isBuildRunning = isBuildRunning,
             gradleSyncNeeded = gradleSyncNeeded,
             variants = variants,
-            onRun = { task, flag ->
+            onRun = { args ->
                 gradleSyncNeeded = false
-                saveProjectBuildPrefs(task, flag)
-                if (flag == "none") runGradleTask(task) else runGradleTask(task, flag)
+                // Remember the task itself so the toolbar's Build button
+                // repeats it; the rest of the line (flags, custom tasks)
+                // stays specific to this run.
+                saveProjectBuildPrefs(args.first(), "none")
+                runGradleTask(*args.toTypedArray())
             },
-            onRunBackground = { task, flag ->
+            onRunBackground = { args ->
                 val dir = currentProjectDir ?: return@show
-                saveProjectBuildPrefs(task, flag)
-                val backgroundTasks = if (flag == "none") listOf(task) else listOf(task, flag)
+                saveProjectBuildPrefs(args.first(), "none")
                 saveAllFiles()
-                GradleBuildService.start(this@MainActivity, dir, backgroundTasks)
+                GradleBuildService.start(this@MainActivity, dir, args)
                 setStatus("Background build started")
             },
             onStop = {
