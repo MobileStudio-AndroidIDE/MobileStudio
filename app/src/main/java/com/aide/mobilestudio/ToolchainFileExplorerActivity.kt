@@ -757,10 +757,19 @@ class ToolchainFileExplorerActivity : AppCompatActivity(), ContextMenuUtils.File
                 if (hasSource) add(if (AppLanguage.isKorean(this@ToolchainFileExplorerActivity)) "box64 빌드 & 실행" else "Build & Run (box64)")
             }
             if (isTextLike(file)) add("Open Text")
-            if (file.extension.equals("apk", true)) add("Install APK")
+            if (isImage(file)) add("Open Image")
+            if (file.extension.equals("apk", true)) {
+                add("Install APK")
+                add(if (AppLanguage.isKorean(this@ToolchainFileExplorerActivity)) "디컴파일 (jadx)" else "Decompile (jadx)")
+                add(if (AppLanguage.isKorean(this@ToolchainFileExplorerActivity)) "APK 내용 보기" else "View contents")
+                add(if (AppLanguage.isKorean(this@ToolchainFileExplorerActivity)) "APK 서명 확인" else "Check signature")
+            }
             if (file.extension.equals("jar", true)) add("Run JAR")
             if (selectionAllowed && file.isDirectory) add("Use as ${kind.displayName}")
-            if (isArchive(file)) add("Extract here")
+            if (isArchive(file) && !file.extension.equals("apk", true)) {
+                add(if (AppLanguage.isKorean(this@ToolchainFileExplorerActivity)) "보기 (압축 해제 없이)" else "View contents")
+                add("Extract here")
+            }
             add("Compress to .zip")
             add("Copy Path")
             add("Copy")
@@ -799,12 +808,18 @@ class ToolchainFileExplorerActivity : AppCompatActivity(), ContextMenuUtils.File
                         } else runExeWithBox64(file)
                     }
                     "Install APK" -> installApk(file)
+                    "Open Image" -> openImageFile(file)
+                    "Decompile (jadx)" -> decompileApk(file)
+                    "APK 서명 확인" -> checkApkSignature(file)
                     "Run JAR" -> runJar(file)
                     "Use as ${kind.displayName}" -> {
                         currentDir = file
                         useCurrentDirectory()
                     }
                     "Extract here" -> extractArchive(file)
+                    // Two labels, one behaviour: an APK and a tar are both
+                    // archives, and looking inside is the same question.
+                    "View contents", "APK 내용 보기", "보기 (압축 해제 없이)" -> showArchiveContents(file)
                     "Compress to .zip" -> zipEntry(file)
                     "Copy Path" -> {
                         val path = file.absolutePath
@@ -856,9 +871,25 @@ class ToolchainFileExplorerActivity : AppCompatActivity(), ContextMenuUtils.File
             file.extension.equals("apk", true) -> installApk(file)
             file.extension.equals("jar", true) -> runJar(file)
             file.extension.equals("exe", true) -> showFileActions(file)
+            isImage(file) -> openImageFile(file)
+            isArchive(file) -> showArchiveContents(file)
             isTextLike(file) -> openTextFile(file)
             else -> toast("No built-in opener for .${file.extension.ifBlank { "file" }}")
         }
+    }
+
+    /**
+     * Extensions the in-app viewer can display.
+     *
+     * Bitmap formats only. A drawable XML is left to the text opener: it is a
+     * vector description, and decoding it needs the resource compiler rather
+     * than BitmapFactory.
+     */
+    private fun isImage(file: File): Boolean {
+        if (file.isDirectory) return false
+        return file.extension.lowercase(Locale.US) in setOf(
+            "png", "jpg", "jpeg", "webp", "bmp", "gif", "ico",
+        )
     }
 
     private fun isTextLike(file: File): Boolean {
@@ -914,6 +945,152 @@ class ToolchainFileExplorerActivity : AppCompatActivity(), ContextMenuUtils.File
         }
         runCatching { startActivity(intent) }
             .onFailure { toast("APK install failed: ${it.message}") }
+    }
+
+    /**
+     * Decomposes an APK with jadx.
+     *
+     * jadx is not bundled - it is several megabytes and most builds never
+     * need it - so it is looked up on the tool paths the app already has.
+     * When it is missing the dialog says so and offers the built-in contents
+     * listing instead, which answers the smaller half of the same question
+     * without any download.
+     */
+    private fun decompileApk(file: File) {
+        val jadx = findJadx()
+        if (jadx == null) {
+            AlertDialog.Builder(this)
+                .setTitle("jadx")
+                .setMessage(
+                    if (AppLanguage.isKorean(this)) {
+                        "jadx를 찾지 못했습니다. 터미널에서 설치한 뒤 다시 시도하세요.\n\n" +
+                            "APK 내부 목록은 jadx 없이도 볼 수 있습니다."
+                    } else {
+                        "jadx was not found. Install it in the terminal and try again.\n\n" +
+                            "The APK's contents can still be listed without it."
+                    },
+                )
+                .setPositiveButton("View contents") { _, _ -> showArchiveContents(file) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+
+        val outDir = File(file.parentFile, file.nameWithoutArchiveExtension() + "-src")
+        AlertDialog.Builder(this)
+            .setTitle("jadx")
+            .setMessage(
+                if (AppLanguage.isKorean(this)) {
+                    "${file.name}\n\n출력: ${outDir.name}/"
+                } else {
+                    "${file.name}\n\nOutput: ${outDir.name}/"
+                },
+            )
+            .setPositiveButton("Decompile") { _, _ ->
+                toast("Decompiling ${file.name}...")
+                Thread {
+                    val result = runCatching {
+                        val process = ProcessBuilder(
+                            jadx.absolutePath, "-d", outDir.absolutePath, file.absolutePath,
+                        ).redirectErrorStream(true).start()
+                        val out = process.inputStream.bufferedReader().readText()
+                        val code = process.waitFor()
+                        if (code != 0) "jadx exited with $code\n$out" else null
+                    }.getOrElse { "jadx failed: ${it.message}" }
+
+                    runOnUiThread {
+                        if (result == null) {
+                            toast("Decompiled to ${outDir.name}/")
+                            currentDir = outDir
+                            refreshDirectory()
+                        } else {
+                            openTextOutput("jadx", result)
+                        }
+                    }
+                }.start()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Locates a jadx launcher on the paths the app's toolchain uses. */
+    private fun findJadx(): File? {
+        val names = listOf("jadx", "jadx-cli")
+        val roots = listOf(
+            File(filesDir, "toolchain/runtime-tools/bin"),
+            File(filesDir, "toolchain/usr/bin"),
+            File(filesDir, "usr/bin"),
+            File("/system/bin"),
+        )
+        for (root in roots) {
+            for (name in names) {
+                val candidate = File(root, name)
+                if (candidate.isFile && candidate.canExecute()) return candidate
+            }
+        }
+        // Fall back to PATH so a jadx installed in the terminal is found too.
+        val path = System.getenv("PATH") ?: return null
+        return path.split(':')
+            .filter { it.isNotBlank() }
+            .mapNotNull { dir -> names.mapNotNull { n ->
+                File(dir, n).takeIf { it.isFile && it.canExecute() }
+            }.firstOrNull() }
+            .firstOrNull()
+    }
+
+    /**
+     * Shows the certificates an APK is signed with.
+     *
+     * Worth having next to install: a "release" APK signed with the debug key
+     * is a common mistake, and it is invisible until the install is refused on
+     * a device that already has the app.
+     */
+    private fun checkApkSignature(file: File) {
+        Thread {
+            val info = runCatching {
+                packageManager.getPackageArchiveInfo(
+                    file.absolutePath,
+                    android.content.pm.PackageManager.GET_SIGNATURES,
+                )
+            }.getOrNull()
+
+            runOnUiThread {
+                if (info == null) {
+                    toast("Could not read the APK")
+                    return@runOnUiThread
+                }
+                val body = StringBuilder()
+                body.append("package: ${info.packageName}\n")
+                body.append("version: ${info.versionName ?: "?"}\n")
+                body.append("signatures: ${info.signatures?.size ?: 0}\n\n")
+                info.signatures?.forEach { signature ->
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(signature.toByteArray())
+                    body.append(
+                        digest.joinToString(":") { String.format("%02X", it) },
+                    )
+                    body.append('\n')
+                }
+                openTextOutput("${file.name} — signature", body.toString())
+            }
+        }.start()
+    }
+
+    /** Shows a block of text in a scrollable dialog. */
+    private fun openTextOutput(title: String, body: String) {
+        val text = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 11f
+            setTextColor(AndroidColor.parseColor("#E6EAF2"))
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            text = body
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(ScrollView(this).apply { addView(text) })
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     private fun runExeWithBox64(exeFile: File) {
@@ -1287,12 +1464,113 @@ class ToolchainFileExplorerActivity : AppCompatActivity(), ContextMenuUtils.File
         }
     }
 
-    private fun isArchive(file: File): Boolean {
-        val name = file.name.lowercase(Locale.US)
-        return file.isFile && (name.endsWith(".zip") || name.endsWith(".tar") ||
-            name.endsWith(".tar.gz") || name.endsWith(".tgz") ||
-            name.endsWith(".tar.xz") || name.endsWith(".txz") ||
-            name.endsWith(".tar.zst"))
+    private fun isArchive(file: File): Boolean =
+        file.isFile && ArchiveInspector.isArchive(file.name)
+
+    /**
+     * Lists an archive's contents without unpacking it.
+     *
+     * The whole point is answering "what is in here?" before deciding whether
+     * to spend the space and time on extracting it, so extraction is offered
+     * from inside this listing rather than being the only way to look.
+     */
+    private fun showArchiveContents(file: File) {
+        Thread {
+            val listing = runCatching { ArchiveInspector.inspect(file) }
+                .getOrElse { null }
+            runOnUiThread {
+                if (listing == null) {
+                    toast("Could not read ${file.name}")
+                    return@runOnUiThread
+                }
+                val body = StringBuilder()
+                listing.entries.take(400).forEach { entry ->
+                    body.append(if (entry.isDirectory) "d  " else "   ")
+                    body.append(entry.name)
+                    if (!entry.isDirectory && entry.size >= 0) {
+                        body.append("   ").append(entry.humanSize)
+                    }
+                    body.append('\n')
+                }
+                if (listing.truncated) {
+                    body.append("\n… showing the first ${listing.entries.size} entries\n")
+                }
+
+                val text = TextView(this).apply {
+                    typeface = Typeface.MONOSPACE
+                    textSize = 11f
+                    setTextColor(AndroidColor.parseColor("#E6EAF2"))
+                    setTextIsSelectable(true)
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    text = buildString {
+                        append("${listing.format}  ·  ")
+                        append("${listing.fileCount} files")
+                        if (listing.directoryCount > 0) {
+                            append(", ${listing.directoryCount} folders")
+                        }
+                        append('\n')
+                        append("contents ")
+                        append(ArchiveInspector.humanBytes(listing.totalUncompressed))
+                        append("  ·  archive ")
+                        append(ArchiveInspector.humanBytes(listing.totalCompressed))
+                        append("\n\n")
+                        append(body)
+                    }
+                }
+                AlertDialog.Builder(this)
+                    .setTitle(file.name)
+                    .setView(ScrollView(this).apply { addView(text) })
+                    .setPositiveButton(
+                        if (AppLanguage.isKorean(this)) "여기서 압축 풀기" else "Extract here",
+                    ) { _, _ -> extractArchive(file) }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }.start()
+    }
+
+    /** Shows an image full size, with pinch to zoom and drag to pan. */
+    private fun openImageFile(file: File) {
+        Thread {
+            val bitmap = runCatching { decodeScaledBitmap(file, 2048) }.getOrNull()
+            runOnUiThread {
+                if (bitmap == null) {
+                    toast("Could not decode ${file.name}")
+                    return@runOnUiThread
+                }
+                val zoom = ZoomableImageView(this).apply {
+                    showBitmap(bitmap)
+                    setBackgroundColor(AndroidColor.BLACK)
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("${file.name}  ·  ${bitmap.width}×${bitmap.height}")
+                    .setView(zoom, dp(8), dp(8), dp(8), dp(8))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+            }
+        }.start()
+    }
+
+    /**
+     * Decodes a bitmap capped to [maxSide].
+     *
+     * A phone photo can be tens of megapixels; decoding it at full size to show
+     * it in a dialog is how an image viewer gets the app killed. The cap keeps
+     * the decode bounded while still being sharper than the screen.
+     */
+    private fun decodeScaledBitmap(file: File, maxSide: Int): android.graphics.Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) {
+            sample *= 2
+        }
+        return android.graphics.BitmapFactory.decodeFile(
+            file.absolutePath,
+            android.graphics.BitmapFactory.Options().apply { inSampleSize = sample },
+        )
     }
 
     private fun File.nameWithoutArchiveExtension(): String {
