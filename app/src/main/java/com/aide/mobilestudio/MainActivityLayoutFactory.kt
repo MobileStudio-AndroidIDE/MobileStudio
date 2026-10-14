@@ -232,7 +232,7 @@ internal fun MainActivity.buildMainLayout(): View {
 }
 
 private fun Context.buildMainSurface(): View {
-    val isLandscape = resources.displayMetrics.widthPixels > resources.displayMetrics.heightPixels
+    val isLandscape = isLandscapeScreen()
     val isTablet = resources.displayMetrics.widthPixels >= 600 * resources.displayMetrics.density
     
     // Phase 6.1: Horizontal mode 3-pane layout (file tree | editor | bottom panel)
@@ -245,14 +245,52 @@ private fun Context.buildMainSurface(): View {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(c(StudioUi.Ink))
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            addView(buildTopTextMenu())
-            addView(buildPrimaryToolbar())
+            addView(buildChrome())
             addView(buildProjectTabStrip())
             addView(buildTabStrip())
             addView(buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(buildStatusBar())
         }
         addView(content)
+    }
+}
+
+private fun Context.isLandscapeScreen(): Boolean =
+    resources.displayMetrics.widthPixels > resources.displayMetrics.heightPixels
+
+/**
+ * The menu row and the toolbar row.
+ *
+ * Portrait stacks them, which is fine because there is vertical room to spare.
+ * A landscape phone has almost none - the chrome eats a fifth of the screen -
+ * so the menu scrolls horizontally inside the toolbar row instead, giving the
+ * editor the full 28dp back without dropping any menu: the items are found by
+ * id, so moving them to another parent leaves every handler intact.
+ */
+private fun Context.buildChrome(): View {
+    val menu = buildTopTextMenu()
+    val toolbar = buildPrimaryToolbar()
+    if (!isLandscapeScreen()) {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            addView(menu)
+            addView(toolbar)
+        }
+    }
+    return LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(c(StudioUi.LayerToolbar))
+        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
+        addView(toolbar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3f))
+        addView(View(this@buildChrome), LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+            // A hairline so the two groups read as separate, not as one row.
+            setBackgroundColor(StudioUi.color("#3E4451"))
+        })
+        // The menu row keeps its own 28dp height so the parent's CENTER_VERTICAL
+        // centres it instead of leaving it pinned to the top of the 40dp row.
+        addView(menu, LinearLayout.LayoutParams(0, dp(28), 2f))
     }
 }
 
@@ -284,8 +322,7 @@ private fun Context.buildLandscapeMainSurface(): View {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
                 background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
                 
-                addView(ctx.buildTopTextMenu())
-                addView(ctx.buildPrimaryToolbar())
+                addView(ctx.buildChrome())
                 addView(ctx.buildProjectTabStrip())
                 addView(ctx.buildTabStrip())
                 addView(ctx.buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))

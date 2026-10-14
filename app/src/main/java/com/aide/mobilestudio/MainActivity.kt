@@ -735,9 +735,13 @@ Long press: Toggle Shell panel"""
 
     private fun applyPhoneMode() {
         runOnUiThread {
-            // Compact mode for phones
-            findViewById<HorizontalScrollView>(R.id.top_text_menu)?.visibility = View.GONE
-            findViewById<View>(R.id.build_icon_toolbar)?.visibility = View.GONE
+            // Compact mode for phones. Only the toolbar height is adjusted
+            // here: whether the menu row gets its own row or scrolls inside
+            // the toolbar row is decided by MainActivityLayoutFactory when the
+            // layout is built, so hiding it here would just leave a gap (or
+            // remove the menus entirely in landscape). The toolbar itself must
+            // never be hidden - it carries build / sync / back / forward.
+            findViewById<View>(R.id.build_icon_toolbar)?.visibility = View.VISIBLE
             val primaryToolbar = findViewById<LinearLayout>(R.id.build_icon_toolbar)
             primaryToolbar?.layoutParams?.height = dp(40)
             primaryToolbar?.requestLayout()
