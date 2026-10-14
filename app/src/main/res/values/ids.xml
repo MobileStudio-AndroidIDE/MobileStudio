@@ -105,6 +105,7 @@
     <item name="shell_output" type="id" />
     <item name="shell_panel" type="id" />
     <item name="shell_grabber" type="id" />
+    <item name="build_output_empty" type="id" />
     <item name="shell_grabber_icon" type="id" />
     <item name="shell_prompt" type="id" />
     <item name="shell_run" type="id" />

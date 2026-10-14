@@ -576,28 +576,82 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     }
 
     private fun showSettingsDialog() {
-        val options = arrayOf(
-            if (AppLanguage.isKorean(this)) "테마 변경" else "Change Theme",
-            if (AppLanguage.isKorean(this)) "에디터 글자 크기" else "Editor Font Size",
-            if (AppLanguage.isKorean(this)) "터미널 글자 크기" else "Terminal Font Size",
-            if (AppLanguage.isKorean(this)) "키바인딩" else "Keybindings",
-            if (AppLanguage.isKorean(this)) "언어" else "Language",
-            if (AppLanguage.isKorean(this)) "튜토리얼 다시 보기" else "Restart Tutorial"
+        val isKorean = AppLanguage.isKorean(this)
+
+        data class Item(val label: String, val onClick: () -> Unit)
+
+        /*
+         * Grouped rather than a flat list. Six unrelated entries read as one
+         * undifferentiated pile, and the two font sizes - easy to confuse -
+         * sat next to each other with nothing saying which surface each one
+         * changes, so the grouping carries that instead.
+         */
+        val groups = listOf(
+            (if (isKorean) "화면" else "Appearance") to listOf(
+                Item(if (isKorean) "테마 변경" else "Change Theme") { showThemeDialog() },
+                Item(if (isKorean) "에디터 글자 크기" else "Editor Font Size") { showFontSizeDialog() },
+                Item(if (isKorean) "터미널 글자 크기" else "Terminal Font Size") { showTerminalFontSizeDialog() },
+            ),
+            (if (isKorean) "입력" else "Input") to listOf(
+                Item(if (isKorean) "키바인딩 / 제스처" else "Keybindings / Gestures") { showKeybindingDialog() },
+            ),
+            (if (isKorean) "일반" else "General") to listOf(
+                Item(if (isKorean) "언어" else "Language") { showLanguageDialog() },
+                Item(if (isKorean) "튜토리얼 다시 보기" else "Restart Tutorial") {
+                    showToast(if (isKorean) "튜토리얼을 다시 시작합니다" else "Tutorial restarted")
+                    showTutorial()
+                },
+            ),
         )
-        AlertDialog.Builder(this)
-            .setTitle(if (AppLanguage.isKorean(this)) "설정" else "Settings")
-            .setItems(options) { _, which ->
-                when (which) {
-                    0 -> showThemeDialog()
-                    1 -> showFontSizeDialog()
-                    2 -> showTerminalFontSizeDialog()
-                    3 -> showKeybindingDialog()
-                    4 -> showLanguageDialog()
-                    5 -> { showToast("Tutorial restarted"); showTutorial() }
-                }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+            setBackgroundColor(StudioUi.color(StudioUi.Card))
+        }
+
+        // Set once the dialog exists so a row can close it before opening its
+        // own dialog; without that the two would sit on top of each other.
+        var dialog: AlertDialog? = null
+
+        groups.forEach { (header, items) ->
+            root.addView(TextView(this).apply {
+                text = header
+                textSize = StudioUi.TypeCaption
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(StudioUi.color(StudioUi.TextSoft))
+                setPadding(0, dp(16), 0, dp(6))
+            })
+            items.forEach { item ->
+                root.addView(TextView(this).apply {
+                    text = item.label
+                    textSize = StudioUi.TypeBody
+                    setTextColor(StudioUi.color(StudioUi.Text))
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(13), dp(12), dp(13))
+                    background = StudioUi.ripple(
+                        this@MainActivity,
+                        StudioUi.rounded(
+                            this@MainActivity,
+                            fill = StudioUi.Card2,
+                            stroke = StudioUi.Border,
+                            radiusDp = StudioUi.RadiusMd,
+                        ),
+                    )
+                    setOnClickListener {
+                        dialog?.dismiss()
+                        item.onClick()
+                    }
+                })
             }
-            .setNegativeButton(if (AppLanguage.isKorean(this)) "닫기" else "Close", null)
-            .show()
+        }
+
+        dialog = AlertDialog.Builder(this)
+            .setTitle(if (isKorean) "설정" else "Settings")
+            .setView(ScrollView(this).apply { addView(root) })
+            .setNegativeButton(if (isKorean) "닫기" else "Close", null)
+            .create()
+        dialog?.show()
     }
 
     private fun showTerminalFontSizeDialog() {
@@ -4973,18 +5027,58 @@ Long press: Toggle Shell panel"""
         val resultList = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
         }
-        val emptyView = TextView(this).apply {
-            text = ui("No results")
-            setTextColor(StudioUi.color(StudioUi.TextSoft))
-            textSize = 12f
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(24), dp(8), dp(24))
-            visibility = View.GONE
+
+        // Results and the empty state share one host rather than stacking, so
+        // the placeholder can fill the panel without the list having to give
+        // up its height when there is something to show.
+        val resultsHost = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
         }
+        resultsHost.addView(
+            resultList,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        // Two different blanks: nothing typed yet, and nothing found. They look
+        // the same otherwise, and only one of them is the user's problem.
+        val emptyContainer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
+        }
+        fun showEmpty(glyph: String, title: String, hint: String) {
+            emptyContainer.removeAllViews()
+            emptyContainer.addView(
+                StudioUi.emptyState(
+                    this@MainActivity,
+                    glyph = glyph,
+                    title = title,
+                    hint = hint,
+                ),
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+            emptyContainer.visibility = View.VISIBLE
+        }
+        val idleEmpty = Triple(
+            "\uD83D\uDD0D",
+            ui("프로젝트 검색"),
+            ui("찾을 문자열을 입력하면 파일 전체에서 찾아줍니다"),
+        )
+        showEmpty(idleEmpty.first, idleEmpty.second, idleEmpty.third)
+        resultsHost.addView(emptyContainer)
+
         searchContainer.addView(etSearch)
         searchContainer.addView(optionsRow)
-        searchContainer.addView(resultList)
-        searchContainer.addView(emptyView)
+        searchContainer.addView(resultsHost)
 
         var searchJob: Job? = null
         etSearch.addTextChangedListener(object : TextWatcher {
@@ -4995,7 +5089,7 @@ Long press: Toggle Shell panel"""
                 searchJob?.cancel()
                 if (q.length < 2) {
                     resultList.adapter = SearchResultAdapter(emptyList()) { _, _ -> }
-                    emptyView.visibility = View.GONE
+                    showEmpty(idleEmpty.first, idleEmpty.second, idleEmpty.third)
                     return
                 }
                 val cs = caseSensitive
@@ -5018,7 +5112,15 @@ Long press: Toggle Shell panel"""
                         }
                         codeEditor.setSelection(offset.coerceAtMost(text.length))
                     }
-                    emptyView.visibility = if (results.isEmpty()) View.VISIBLE else View.GONE
+                    if (results.isEmpty()) {
+                        showEmpty(
+                            "\u2753",
+                            ui("결과 없음"),
+                            "\"$q\"과(와) 일치하는 줄을 찾지 못했습니다",
+                        )
+                    } else {
+                        emptyContainer.visibility = View.GONE
+                    }
                 }
             }
         })
@@ -7684,6 +7786,48 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             }
         )
         problemsRecycler.adapter = problemsAdapter
+
+        // The empty view follows the adapter rather than the places that fill
+        // it, so it stays correct however problems arrive - from a build, from
+        // a lint run, or from the editor's own analysis.
+        val problemsParent = problemsRecycler.parent as? LinearLayout
+        val problemsEmpty = StudioUi.emptyState(
+            this,
+            glyph = "\u2705",
+            title = ui("문제 없음"),
+            hint = ui("빌드와 정적 분석의 진단이 여기에 표시됩니다"),
+        )
+        problemsParent?.addView(
+            problemsEmpty,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ),
+        )
+        // Mirror the count on the panel tab the way an IDE does, so the number
+        // of problems is visible without opening the tab. The icon-only label
+        // used on narrow screens is left alone: a count would not fit.
+        val problemsTab = findViewById<TextView>(R.id.tab_problems)
+        val problemsTabBase = problemsTab?.text?.toString()
+        fun syncProblemsTab(count: Int) {
+            if (problemsTab == null || problemsTabBase == null || problemsTabBase.length <= 3) return
+            problemsTab.text = if (count > 0) "$problemsTabBase ($count)" else problemsTabBase
+        }
+
+        fun syncProblemsEmpty() {
+            val empty = problemsAdapter.itemCount == 0
+            problemsEmpty.visibility = if (empty) View.VISIBLE else View.GONE
+            problemsRecycler.visibility = if (empty) View.GONE else View.VISIBLE
+            syncProblemsTab(problemsAdapter.itemCount)
+        }
+        problemsAdapter.registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+            override fun onChanged() = syncProblemsEmpty()
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = syncProblemsEmpty()
+            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = syncProblemsEmpty()
+            override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = syncProblemsEmpty()
+        })
+        syncProblemsEmpty()
         autoComplete = KotlinAutoComplete(this, codeEditor)
         webAutoComplete = com.aide.mobilestudio.web.WebAutoComplete(this, codeEditor)
 
@@ -8455,7 +8599,13 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         // Row B spinner (moved up from the deleted build toolbar row)
         findViewById<ProgressBar>(R.id.build_progress)?.visibility =
             if (running) View.VISIBLE else View.INVISIBLE
-        if (running) buildMonitor.clear()
+        if (running) {
+            buildMonitor.clear()
+            // The first line of output replaces the placeholder; leaving it up
+            // would put a note about having never built over the build that is
+            // now running.
+            findViewById<View>(R.id.build_output_empty)?.visibility = View.GONE
+        }
         // Update toolbar run button: single dynamic button
         findViewById<ImageButton>(R.id.btn_run)?.apply {
             setImageResource(if (running) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)

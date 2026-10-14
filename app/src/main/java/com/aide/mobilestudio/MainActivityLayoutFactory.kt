@@ -1041,12 +1041,50 @@ private fun Context.buildQuickBar(): View {
     }
 }
 
+/**
+ * A small action chip on the terminal's toolbar row.
+ *
+ * These used to be bare text with no background and no minimum size, so
+ * "Copy" and "Paste" were a few pixels of glyph each and gave no sign of being
+ * pressable at all. A chip with a real background and the shared touch-target
+ * floor makes them findable and hit-able.
+ */
+private fun Context.shellChip(viewId: Int, label: String, onClick: (() -> Unit)? = null): TextView {
+    return TextView(this).apply {
+        id = viewId
+        text = label
+        textSize = StudioUi.TypeSmall
+        setTextColor(c(StudioUi.TextSoft))
+        gravity = Gravity.CENTER
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        minimumHeight = dp(30)
+        background = StudioUi.ripple(
+            this@shellChip,
+            StudioUi.rounded(
+                this@shellChip,
+                fill = StudioUi.Surface2,
+                stroke = StudioUi.Border,
+                radiusDp = StudioUi.RadiusMd,
+            ),
+        )
+        StudioUi.touchLift(this)
+        StudioUi.enforceMinTouchTarget(this)
+        if (onClick != null) setOnClickListener { onClick() }
+        val params = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+        params.marginStart = dp(4)
+        layoutParams = params
+    }
+}
+
 private fun Context.buildTerminalKeyBar(): View {
     return HorizontalScrollView(this).apply {
         id = R.id.terminal_key_bar
         isHorizontalScrollBarEnabled = false
         overScrollMode = View.OVER_SCROLL_NEVER
-        setBackgroundColor(Color.parseColor("#141A24"))
+        setBackgroundColor(c(StudioUi.Surface))
         visibility = View.GONE
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         addView(LinearLayout(this@buildTerminalKeyBar).apply {
@@ -1066,21 +1104,43 @@ private fun Context.buildTerminalKeyBar(): View {
     }
 }
 
+/**
+ * A key on the terminal's extra row.
+ *
+ * These stand in for keys a phone keyboard does not have, so they are pressed
+ * constantly and often one-handed. They get a real fill and stroke rather than
+ * a hairline outline on nothing, a minimum width so the arrows line up in a
+ * column, and the shared touch-target floor - a 12sp glyph with 10dp of padding
+ * around it is otherwise well under the 48dp a tap should reach.
+ */
 private fun Context.terminalKeyButton(viewId: Int, label: String): TextView {
     return TextView(this).apply {
         id = viewId
         text = label
-        textSize = 12f
+        textSize = StudioUi.TypeSmall
         typeface = Typeface.MONOSPACE
-        setTextColor(Color.parseColor("#8E99AC"))
+        setTextColor(c(StudioUi.TextSoft))
         gravity = Gravity.CENTER
         setPadding(dp(10), dp(6), dp(10), dp(6))
-        minWidth = dp(38)
-        background = GradientDrawable().apply {
-            setColor(Color.TRANSPARENT)
-            cornerRadius = dp(6).toFloat()
-            setStroke(1, Color.parseColor("#333333"))
-        }
+        minWidth = dp(40)
+        minimumHeight = dp(34)
+        background = StudioUi.ripple(
+            this@terminalKeyButton,
+            StudioUi.rounded(
+                this@terminalKeyButton,
+                fill = StudioUi.Surface2,
+                stroke = StudioUi.Border,
+                radiusDp = StudioUi.RadiusMd,
+            ),
+        )
+        StudioUi.touchLift(this)
+        StudioUi.enforceMinTouchTarget(this)
+        val params = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+        params.marginEnd = dp(4)
+        layoutParams = params
     }
 }
 
@@ -1147,9 +1207,28 @@ private fun Context.buildBottomPanel(): View {
                     setBackgroundColor(c("#2F3B4D"))
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
 
-                // Bottom: Raw Log Output
-                addView(BuildOutputView(this@buildBottomPanel).apply {
-                    id = R.id.build_output
+                // Bottom: Raw Log Output. The placeholder overlays the log
+                // rather than sharing its height, so the first build does not
+                // have to share the panel with a note about itself.
+                addView(FrameLayout(this@buildBottomPanel).apply {
+                    addView(BuildOutputView(this@buildBottomPanel).apply {
+                        id = R.id.build_output
+                    }, FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ))
+                    addView(StudioUi.emptyState(
+                        this@buildBottomPanel,
+                        glyph = "\u25B6",
+                        title = AppLanguage.literal(this@buildBottomPanel, "아직 빌드 기록이 없습니다"),
+                        hint = AppLanguage.literal(
+                            this@buildBottomPanel,
+                            "재생산 아이콘을 눌러 첫 빌드를 시작하세요",
+                        ),
+                    ).apply { id = R.id.build_output_empty }, FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ))
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.5f))
 
             }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -1244,41 +1323,16 @@ addView(LinearLayout(this@buildBottomPanel).apply {
                         typeface = android.graphics.Typeface.DEFAULT_BOLD
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     })
-                    addView(android.widget.TextView(this@buildBottomPanel).apply {
-                        id = R.id.btn_terminal_copy
-                        text = AppLanguage.literal(this@buildBottomPanel, "Copy")
-                        setTextColor(Color.parseColor("#8E99AC"))
-                        textSize = 11f
-                        setPadding(dp(8), dp(2), dp(8), dp(2))
-                        background = android.graphics.drawable.GradientDrawable().apply {
-                            setColor(Color.TRANSPARENT)
-                            cornerRadius = dp(4).toFloat()
-                        }
-                    })
-                    addView(android.widget.TextView(this@buildBottomPanel).apply {
-                        id = R.id.btn_terminal_paste
-                        text = AppLanguage.literal(this@buildBottomPanel, "Paste")
-                        setTextColor(Color.parseColor("#8E99AC"))
-                        textSize = 11f
-                        setPadding(dp(8), dp(2), dp(8), dp(2))
-                        background = android.graphics.drawable.GradientDrawable().apply {
-                            setColor(Color.TRANSPARENT)
-                            cornerRadius = dp(4).toFloat()
-                        }
-                    })
-                    addView(android.widget.TextView(this@buildBottomPanel).apply {
-                        id = R.id.btn_shell_clear
-                        text = "Clear"
-                        setTextColor(Color.parseColor("#8E99AC"))
-                        textSize = 11f
-                        setPadding(dp(8), dp(2), dp(8), dp(2))
-                        background = android.graphics.drawable.GradientDrawable().apply {
-                            setColor(Color.TRANSPARENT)
-                            cornerRadius = dp(4).toFloat()
-                        }
-                        setOnClickListener {
-                            root.findViewById<TextView>(R.id.shell_output_text)?.text = ""
-                        }
+                    addView(shellChip(
+                        R.id.btn_terminal_copy,
+                        AppLanguage.literal(this@buildBottomPanel, "Copy"),
+                    ))
+                    addView(shellChip(
+                        R.id.btn_terminal_paste,
+                        AppLanguage.literal(this@buildBottomPanel, "Paste"),
+                    ))
+                    addView(shellChip(R.id.btn_shell_clear, "Clear") {
+                        root.findViewById<TextView>(R.id.shell_output_text)?.text = ""
                     })
                 })
 
@@ -1303,14 +1357,14 @@ addView(LinearLayout(this@buildBottomPanel).apply {
                 addView(android.widget.ScrollView(this@buildBottomPanel).apply {
                     id = R.id.shell_output_scroll
                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-                    setBackgroundColor(Color.parseColor("#1A1A1A"))
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    setBackgroundColor(c(StudioUi.Ink))
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
                     isVerticalFadingEdgeEnabled = true
                     addView(android.widget.TextView(this@buildBottomPanel).apply {
                         id = R.id.shell_output_text
                         typeface = android.graphics.Typeface.MONOSPACE
-                        textSize = 13f
-                        setTextColor(Color.parseColor("#D4D4D4"))
+                        textSize = StudioUi.TypeBody
+                        setTextColor(c(StudioUi.Text))
                         setTextIsSelectable(true)
                         setLineSpacing(0f, 1.1f)
                         layoutParams = android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1322,15 +1376,15 @@ addView(LinearLayout(this@buildBottomPanel).apply {
                     id = R.id.shell_input_row
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
-                    setBackgroundColor(Color.parseColor("#1A1A1A"))
+                    setPadding(dp(10), dp(6), dp(10), dp(6))
+                    setBackgroundColor(c(StudioUi.Surface))
                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     addView(android.widget.TextView(this@buildBottomPanel).apply {
                         text = "$"
-                        setTextColor(Color.parseColor("#50FA7B"))
-                        textSize = 14f
+                        setTextColor(c(StudioUi.Green))
+                        textSize = StudioUi.TypeBody
                         typeface = android.graphics.Typeface.MONOSPACE
-                        setPadding(dp(4), 0, dp(4), 0)
+                        setPadding(0, 0, dp(6), 0)
                     })
                     addView(android.widget.EditText(this@buildBottomPanel).apply {
                         id = R.id.shell_input
