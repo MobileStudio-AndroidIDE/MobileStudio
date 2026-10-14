@@ -14,6 +14,10 @@ import java.io.File
 class ComposePreviewActivity : AppCompatActivity() {
     companion object {
         private const val EXTRA_FILE = "extra_file_path"
+
+        /** How far a preview that delegates to another composable may be followed. */
+        private const val MAX_DELEGATION_DEPTH = 4
+
         fun start(context: Context, file: File) { context.startActivity(Intent(context, ComposePreviewActivity::class.java).putExtra(EXTRA_FILE, file.absolutePath)) }
     }
 
@@ -50,7 +54,7 @@ class ComposePreviewActivity : AppCompatActivity() {
     @SuppressLint("SetTextI18n")
     private fun parsePreviews() {
         previews.clear()
-        val source = runCatching { sourceFile?.readText() }.getOrDefault("") ?: ""
+        val source = runCatching { sourceFile?.readText() }.getOrNull().orEmpty() ?: ""
         val pat = java.util.regex.Pattern.compile("""@Preview\s*\(([^)]*)\)\s*\n\s*(?:private\s+)?fun\s+(\w+)""")
         val m = pat.matcher(source)
         while (m.find()) {
@@ -78,6 +82,8 @@ class ComposePreviewActivity : AppCompatActivity() {
             status?.text = "No @Preview functions found"; return
         }
         status?.text = "Found ${previews.size} @Preview function(s)"
+        val source = runCatching { sourceFile?.readText() }.getOrNull().orEmpty()
+        val renderer = ComposeStructuralRenderer(this)
         previews.forEach { preview ->
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -97,30 +103,64 @@ class ComposePreviewActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(w.coerceAtMost(resources.displayMetrics.widthPixels - dp(48)), h.coerceAtMost((resources.displayMetrics.heightPixels * 0.6).toInt())).also { it.gravity = Gravity.CENTER_HORIZONTAL }
                 background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(16f) }
                 elevation = dp(4f)
+                clipToOutline = true
             }
-            phoneFrame.addView(ComposePreviewCanvas(this, preview), FrameLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
+            when (val result = renderComposable(source, preview.name)) {
+                is ComposeStructuralParser.Result.Ok -> {
+                    val content = renderer.render(result.root)
+                    content.layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    )
+                    phoneFrame.addView(content)
+                    if (result.truncated) {
+                        phoneFrame.addView(simulationNote("Preview is too large to draw completely; showing the top of the tree."))
+                    }
+                }
+                is ComposeStructuralParser.Result.Failed -> {
+                    phoneFrame.addView(simulationNote("Could not parse ${preview.name}:\n${result.error.message} (line ${result.error.line})"))
+                }
+            }
             card.addView(phoneFrame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).also { it.gravity = Gravity.CENTER_HORIZONTAL })
-            val source = runCatching { sourceFile?.readText() }.getOrDefault("") ?: ""
             val lines = source.lines(); val start = (preview.startLine - 1).coerceAtLeast(0); val end = preview.endLine.coerceAtMost(lines.size)
             card.addView(TextView(this).apply { text = lines.subList(start, end).joinToString("\n"); setTextColor(Color.parseColor("#C9D1D9")); typeface = Typeface.MONOSPACE; textSize = 10f; setPadding(dp(8), dp(8), dp(8), dp(8)); setBackgroundColor(Color.parseColor("#0F1218")) })
             container.addView(card)
         }
     }
 
-    inner class ComposePreviewCanvas(context: Context, private val p: PreviewFunc) : View(context) {
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas); canvas.drawColor(Color.WHITE); val d = resources.displayMetrics.density; val cx = width / 2f; val cy = height / 2f
-            canvas.drawText(p.name, cx, cy - 40 * d, Paint().apply { color = Color.parseColor("#1A1A1A"); textSize = 18f * d; isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD })
-            canvas.drawText("Preview Function", cx, cy, Paint().apply { color = Color.parseColor("#666666"); textSize = 12f * d; isAntiAlias = true; textAlign = Paint.Align.CENTER })
-            val btnRect = RectF(cx - 60 * d, cy + 20 * d, cx + 60 * d, cy + 50 * d)
-            canvas.drawRoundRect(btnRect, 8f * d, 8f * d, Paint().apply { color = Color.parseColor("#6200EE"); isAntiAlias = true })
-            canvas.drawText("Button", btnRect.centerX(), btnRect.centerY() + 4 * d, Paint().apply { color = Color.WHITE; textSize = 12f * d; isAntiAlias = true; textAlign = Paint.Align.CENTER })
-            val etRect = RectF(cx - 80 * d, cy + 70 * d, cx + 80 * d, cy + 100 * d)
-            canvas.drawRoundRect(etRect, 4f * d, 4f * d, Paint().apply { color = Color.parseColor("#F5F5F5"); isAntiAlias = true })
-            canvas.drawRoundRect(etRect, 4f * d, 4f * d, Paint().apply { color = Color.parseColor("#CCCCCC"); style = Paint.Style.STROKE; strokeWidth = 1f })
-            canvas.drawText("Text field", etRect.left + 8 * d, etRect.centerY() + 4 * d, Paint().apply { color = Color.parseColor("#999999"); textSize = 11f * d; isAntiAlias = true })
+    /**
+     * Parses a preview function, following a body that only delegates to
+     * another composable (`fun Preview() { App() }`) so the real screen is
+     * drawn rather than the one-line wrapper.
+     */
+    private fun renderComposable(source: String, name: String, depth: Int = 0): ComposeStructuralParser.Result {
+        val body = ComposeStructuralParser.functionBody(source, name)
+            ?: return ComposeStructuralParser.Result.Failed(
+                ComposeStructuralParser.ParseError("could not read the body of $name", 0),
+            )
+        val result = ComposeStructuralParser.parseBody(body)
+        if (result is ComposeStructuralParser.Result.Ok && depth < MAX_DELEGATION_DEPTH) {
+            val delegated = result.root
+            val callee = delegated.label
+            if (delegated.kind == ComposeStructuralParser.Kind.PLACEHOLDER && !callee.isNullOrEmpty()) {
+                return renderComposable(source, callee, depth + 1)
+            }
         }
+        return result
     }
+
+    /**
+     * Honest note shown in place of anything the renderer could not simulate,
+     * so a partially drawn preview is never mistaken for a complete one.
+     */
+    private fun simulationNote(text: String): View =
+        TextView(this).apply {
+            this.text = text
+            setTextColor(Color.parseColor("#8B949E"))
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     private fun dp(v: Float): Float = v * resources.displayMetrics.density

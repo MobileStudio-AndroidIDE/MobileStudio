@@ -113,6 +113,71 @@ class LayoutPreviewActivity : AppCompatActivity() {
     }
 
     private var targetFile: File? = null
+
+    /**
+     * Resolves the previewed project's own @dimen/@color/@string references.
+     * Built lazily per file and cached, since one preview session usually
+     * renders a handful of layouts from the same module.
+     */
+    private var resResolver: PreviewResourceResolver? = null
+    private var resResolverBuilt = false
+
+    /**
+     * Every `res/` directory on the way up from [file]. A layout lives at
+     * `<module>/src/main/res/layout/x.xml`, but library modules and projects
+     * using a non-standard layout put resources elsewhere, so the walk looks
+     * for a res directory at each level rather than assuming the depth.
+     */
+    private fun resRootsFor(file: File): List<File> {
+        val roots = LinkedHashSet<File>()
+        var dir: File? = file.parentFile
+        var up = 0
+        while (dir != null && up < 6) {
+            File(dir, "src/main/res").takeIf { it.isDirectory }?.let { roots.add(it) }
+            // A res directory itself: its parent holds the source set dirs.
+            if (dir.name == "res") {
+                roots.add(dir)
+                dir.parentFile?.listFiles()
+                    ?.filter { it.isDirectory && File(it, "res").isDirectory }
+                    ?.forEach { roots.add(File(it, "res")) }
+            }
+            dir = dir.parentFile
+            up++
+        }
+        return roots.toList()
+    }
+
+    /** Resolver for [file], or null when the project declares no resources. */
+    private fun resolverFor(file: File?): PreviewResourceResolver? {
+        // parseDimen/parseColor run once per attribute, so the directory walk
+        // must happen exactly once rather than per lookup.
+        if (resResolverBuilt) return resResolver
+        resResolverBuilt = true
+        file ?: return null
+        val roots = resRootsFor(file)
+        if (roots.isEmpty()) return null
+        val dark = (resources.configuration.uiMode and
+            android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+            android.content.res.Configuration.UI_MODE_NIGHT_YES
+        return PreviewResourceResolver(roots, dark).also { resResolver = it }
+    }
+
+    /**
+     * Dereferences a raw attribute value through the project's resources.
+     * Returns the original text when it is not a project reference - framework
+     * (`@android:...`) and theme (`?attr/...`) values keep flowing to the
+     * built-in handling below - and null when a project reference cannot be
+     * resolved, so the caller keeps its default.
+     */
+    private fun resolveRef(raw: String?): String? {
+        val text = raw?.trim().orEmpty()
+        if (!text.startsWith("@")) return text
+        if (text.startsWith("@android:") || text.startsWith("@null") || text.startsWith("@empty")) {
+            return text
+        }
+        val resolved = resolverFor(targetFile)?.resolve(text) ?: return null
+        return resolved.ifEmpty { null }
+    }
     private var rootNode: XmlNode? = null
     private var selectedNode: XmlNode? = null
     private var isEditMode = false
@@ -839,8 +904,10 @@ class LayoutPreviewActivity : AppCompatActivity() {
 
     private fun applyTextAttrs(v: View, attrs: Map<String, String>) {
         if (v !is TextView) return
-        attrs["text"]?.let { v.text = unescape(it) }
-        attrs["hint"]?.let { v.hint = unescape(it) }
+        // @string/... resolves through the project's res/values; anything else
+        // is left exactly as written (the helper returns the input verbatim).
+        attrs["text"]?.let { v.text = unescape(resolveRef(it) ?: it) }
+        attrs["hint"]?.let { v.hint = unescape(resolveRef(it) ?: it) }
         parseDimen(attrs["textSize"])?.let {
             v.setTextSize(TypedValue.COMPLEX_UNIT_PX, it)
         }
@@ -1032,7 +1099,9 @@ class LayoutPreviewActivity : AppCompatActivity() {
 
     private fun parseDimen(raw: String?): Float? {
         if (raw.isNullOrBlank()) return null
-        val s = raw.trim()
+        // @dimen/foo and @android:dimen/foo dereference through the project's
+        // own res/values before any literal parsing happens.
+        val s = resolveRef(raw)?.trim() ?: return null
         val m = resources.displayMetrics
         fun applyUnit(value: Float, unit: Int) = TypedValue.applyDimension(unit, value, m)
         return when {
@@ -1054,7 +1123,9 @@ class LayoutPreviewActivity : AppCompatActivity() {
 
     private fun parseColor(raw: String?): Int? {
         if (raw.isNullOrBlank()) return null
-        val s = raw.trim()
+        // @color/foo (including chains like @color/accent -> @color/brand)
+        // resolves through the project's res/values first.
+        val s = resolveRef(raw)?.trim() ?: return null
         return try {
             when {
                 s.startsWith("#") -> s.toColorInt()
