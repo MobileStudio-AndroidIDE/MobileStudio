@@ -2,6 +2,7 @@ package com.aide.mobilestudio.extension
 
 import android.content.Context
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.OutputStream
@@ -26,21 +27,34 @@ object GitHubPublisher {
 
     private const val TAG = "GitHubPublisher"
     private const val PREFS = "extensions"
+    private const val SECURE_PREFS = "extensions_secure"
     private const val KEY_TOKEN = "github_token"
     private const val API = "https://api.github.com"
+    /**
+     * Topic stamped on every publisher's extension repository. GitHub Search
+     * (`?q=topic:mobilestudio-extension`) is readable without authentication,
+     * so this topic alone turns every publisher's Releases into a globally
+     * discoverable registry — no marketplace server required.
+     */
+    const val REGISTRY_TOPIC = "mobilestudio-extension"
+    const val REGISTRY_REPO = "MobileStudio-Extensions"
 
     data class Result(val success: Boolean, val message: String, val url: String? = null)
 
+    private fun prefs(context: Context) =
+        com.aide.mobilestudio.SecurePrefs.get(context, SECURE_PREFS).also {
+            com.aide.mobilestudio.SecurePrefs.migrateKeys(context, PREFS, it, setOf(KEY_TOKEN))
+        }
+
     fun setToken(context: Context, token: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_TOKEN, token.trim()).apply()
+        prefs(context).edit().putString(KEY_TOKEN, token.trim()).apply()
     }
 
     fun hasToken(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TOKEN, null)?.isNotBlank() == true
+        prefs(context).getString(KEY_TOKEN, null)?.isNotBlank() == true
 
     fun token(context: Context): String? =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_TOKEN, null)?.trim()
+        prefs(context).getString(KEY_TOKEN, null)?.trim()
 
     // ------------------------- low-level API -------------------------
 
@@ -114,6 +128,8 @@ object GitHubPublisher {
                 .put("description", description)
                 .put("private", false)
                 .put("auto_init", true)
+                // topic 이 있어야 GitHub Search 가 이 저장소를 전역 레지스트리 인덱스에 넣는다.
+                .put("topics", JSONArray().put(REGISTRY_TOPIC))
             val (code, resp) = request(context, "$API/user/repos", "POST", body)
             if (code in 200..201) {
                 val url = JSONObject(resp ?: "{}").optString("html_url")
@@ -202,6 +218,59 @@ object GitHubPublisher {
         }
     }
 
+    /** True when <owner>/<repo> is reachable with the current token. */
+    fun repoExists(context: Context, owner: String, repo: String): Boolean = try {
+        val (code, _) = request(context, "$API/repos/$owner/$repo", "GET")
+        code == 200
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Ensures a PUBLIC <owner>/<repo> exists under the token owner's account,
+     * creating it (auto_init) when missing. Used to give every logged-in user a
+     * public extension repository without any server.
+     */
+    fun ensurePublicRepo(context: Context, owner: String, repo: String): Result {
+        val exists = repoExists(context, owner, repo)
+        if (exists) {
+            // 이미 있는 저장소에도 topic 을 붙여 검색 인덱스에 들어가게 한다.
+            ensureTopic(context, owner, repo)
+            return Result(true, "저장소 확인됨: $owner/$repo")
+        }
+        return createRepo(context, repo, "MobileStudio Extension Repository")
+    }
+
+    /** Stamps [REGISTRY_TOPIC] on an existing repo (idempotent; best effort). */
+    fun ensureTopic(context: Context, owner: String, repo: String) {
+        try {
+            val body = JSONObject().put("names", JSONArray().put(REGISTRY_TOPIC))
+            request(context, "$API/repos/$owner/$repo/topics", "PUT", body)
+        } catch (e: Exception) {
+            Log.w(TAG, "ensureTopic failed for $owner/$repo", e)
+        }
+    }
+
+    /**
+     * Publishes to the logged-in user's own account as a PUBLIC release: ensures
+     * the repo, then creates the release and uploads the .msext / .msextinf assets.
+     */
+    fun publishToUserRepo(
+        context: Context,
+        owner: String,
+        repo: String,
+        msextFile: File,
+        infFile: File,
+        onProgress: (String) -> Unit,
+        onDone: (Result) -> Unit
+    ) {
+        Thread {
+            val ensured = ensurePublicRepo(context, owner, repo)
+            if (!ensured.success) { onDone(ensured); return@Thread }
+            publishExtension(context, owner, repo, msextFile, infFile, onProgress, onDone)
+        }.start()
+    }
+
     /**
      * Full extension publish flow: create release (body = extension.json JSON
      * + sha256/size/download) -> upload .msext asset -> upload .msextinf.
@@ -258,7 +327,10 @@ object GitHubPublisher {
                 val up2 = uploadAsset(context, uploadUrl, infFile.name, infFile)
                 if (!up2.success) { onDone(up2); return@Thread }
 
-                onDone(Result(true, "게시 완료: $name v$version", "$repoUrl/releases/tag/$tag"))
+                // The topic is what puts this release into the GitHub Search index,
+                // so stamp it right before finishing — indexing starts immediately.
+                ensureTopic(context, owner, repo)
+                onDone(Result(true, "게시 완료: $name v$version\n$repoUrl/releases/tag/$tag", "$repoUrl/releases/tag/$tag"))
             } catch (e: Exception) {
                 Log.e(TAG, "publishExtension failed", e)
                 onDone(Result(false, "게시 실패: ${e.message}"))

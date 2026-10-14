@@ -19,34 +19,37 @@ class ToolchainManager(private val context: Context) {
         private const val KEY_CMAKE = "active_cmake"
         private const val KEY_PYTHON = "active_python"
         private const val EXTERNAL_PREFIX = "external_"
+        // Bundled fallbacks — the dynamic catalog (BuildToolCatalog /
+        // ToolchainUpdateSites cache) is authoritative when reachable.
+        // NEWEST FIRST so "first()" consumers pick the newest tool.
         const val DEFAULT_JDK = "jdk-17"
         const val FALLBACK_JDK = "jdk-17"
         const val DEFAULT_GRADLE = "gradle-9.7.0"
 
-        val AVAILABLE_JDK = listOf("jdk-17", "jdk-21")
+        val AVAILABLE_JDK = listOf("jdk-21", "jdk-17")
         val AVAILABLE_GRADLE = listOf(
-            "gradle-9.0.0",
-            "gradle-9.1.0",
-            "gradle-9.2.1",
-            "gradle-9.3.1",
-            "gradle-9.4.1",
-            "gradle-9.5.1",
+            "gradle-9.7.0",
             "gradle-9.6.1",
-            "gradle-9.7.0"
+            "gradle-9.5.1",
+            "gradle-9.4.1",
+            "gradle-9.3.1",
+            "gradle-9.2.1",
+            "gradle-9.1.0",
+            "gradle-9.0.0"
         )
 
         // 8.x series - hidden behind "show old gradle versions" in the Tools UI
         val OLD_GRADLE = listOf(
-            "gradle-8.5",
-            "gradle-8.6",
-            "gradle-8.7",
-            "gradle-8.8",
-            "gradle-8.9",
-            "gradle-8.10",
-            "gradle-8.11",
-            "gradle-8.12",
+            "gradle-8.14.5",
             "gradle-8.13",
-            "gradle-8.14.5"
+            "gradle-8.12",
+            "gradle-8.11",
+            "gradle-8.10",
+            "gradle-8.9",
+            "gradle-8.8",
+            "gradle-8.7",
+            "gradle-8.6",
+            "gradle-8.5"
         )
         val AVAILABLE_SDK = listOf(
             "android-30",
@@ -57,26 +60,26 @@ class ToolchainManager(private val context: Context) {
             "android-35"
         )
         val AVAILABLE_NDK = listOf(
-            "27.0.11718014",
-            "27.0.11902837",
-            "27.0.12077973",
-            "27.1.12297006",
-            "27.2.12479018",
-            "27.3.13750724",
-            "28.0.12433566",
-            "28.0.12674087",
-            "28.0.12916984",
-            "28.0.13004108",
-            "28.1.13356709",
-            "28.2.13676358",
-            "29.0.13113456",
-            "29.0.13599879",
-            "29.0.13846066",
+            "29.0.14206865",
             "29.0.14033849",
-            "29.0.14206865"
+            "29.0.13846066",
+            "29.0.13599879",
+            "29.0.13113456",
+            "28.2.13676358",
+            "28.1.13356709",
+            "28.0.13004108",
+            "28.0.12916984",
+            "28.0.12674087",
+            "28.0.12433566",
+            "27.3.13750724",
+            "27.2.12479018",
+            "27.1.12297006",
+            "27.0.12077973",
+            "27.0.11902837",
+            "27.0.11718014"
         )
-        // 단일 배포 정책: 포팅된 CMake 3.22.1 (arm64-v8a)만 배포한다.
-        // 새 포트 릴리스 시 CmakeRuntimeManager 상수와 함께 갱신.
+        // Bundled fallback: the distributed legacy CMake port. Newer ports are
+        // discovered from the dynamic catalog.
         val AVAILABLE_CMAKE = listOf("3.22.1")
         val AVAILABLE_PYTHON = listOf(
             "python-3.14.0",
@@ -88,37 +91,13 @@ class ToolchainManager(private val context: Context) {
             "python-3.14.6"
         )
 
-    // NDK 버전별 권장 CMake 버전 매핑
-        private val NDK_CMAKE_MAP = mapOf(
-            "27.0.11718014" to "3.22.1",
-            "27.0.11902837" to "3.22.1",
-            "27.0.12077973" to "3.22.1",
-            "27.1.12297006" to "3.22.1",
-            "27.2.12479018" to "3.22.1",
-            "27.3.13750724" to "3.22.1",
-            "28.0.12433566" to "3.22.1",
-            "28.0.12674087" to "3.22.1",
-            "28.0.12916984" to "3.22.1",
-            "28.0.13004108" to "3.22.1",
-            "28.1.13356709" to "3.22.1",
-            "28.2.13676358" to "3.22.1",
-            "29.0.13113456" to "3.22.1",
-            "29.0.13599879" to "3.22.1",
-            "29.0.13846066" to "3.22.1",
-            "29.0.14033849" to "3.22.1",
-            "29.0.14206865" to "3.22.1"
-        )
-
         /**
-         * NDK 버전??맞는 CMake 버전 반환
+         * NDK 버전에 맞는 CMake 버전 반환 — the newest CMake known to the
+         * dynamic catalog (process-wide memo), falling back to the bundled
+         * legacy port when the catalog has not been loaded yet.
          */
-        fun cmakeVersionForNdk(ndkVersion: String): String {
-    // NDK 버전에서 major.minor 추출 (예 "27.2.12479018" -> "27.2")
-            val majorMinor = ndkVersion.split(".").take(2).joinToString(".")
-            return NDK_CMAKE_MAP[ndkVersion]
-                ?: NDK_CMAKE_MAP.entries.firstOrNull { ndkVersion.startsWith(it.key.split(".").take(2).joinToString(".")) }?.value
-                ?: "3.22.1" // 기본값
-        }
+        fun cmakeVersionForNdk(ndkVersion: String): String =
+            BuildToolCatalog.newestCachedCmakeVersion() ?: CmakeRuntimeManager.CMAKE_VERSION
     }
 
     enum class Kind(val displayName: String, val dirName: String) {
@@ -202,16 +181,31 @@ class ToolchainManager(private val context: Context) {
         return (external + local + legacy + sdkCmake + sdkNdk).distinct().sorted()
     }
 
-    fun availableVersions(kind: Kind): List<String> {
-        val bundled = when (kind) {
-            Kind.JDK -> AVAILABLE_JDK
-            Kind.GRADLE -> AVAILABLE_GRADLE
-            Kind.SDK -> AVAILABLE_SDK
-            Kind.NDK -> AVAILABLE_NDK
-            Kind.CMAKE -> AVAILABLE_CMAKE
-            Kind.PYTHON -> AVAILABLE_PYTHON
+    /**
+     * Installable versions, NEWEST FIRST for JDK/Gradle/NDK/CMake. The live
+     * sources (BuildToolCatalog GitHub releases for JDK/NDK/CMake; the
+     * services.gradle.org scraper cache for Gradle) are authoritative; the
+     * bundled lists above are the offline fallback and are merged in so the
+     * list is never smaller than before. SDK/Python keep their existing
+     * ascending order.
+     */
+    fun availableVersions(kind: Kind): List<String> = when (kind) {
+        Kind.JDK ->
+            BuildToolCatalog.jdkEntries(BuildToolCatalog.loadCached(context))
+                .map { "jdk-${it.version}" }
+        Kind.GRADLE -> {
+            val cached = runCatching { ToolchainUpdateSites(context).cachedVersions(kind) }
+                .getOrDefault(emptyList())
+            BuildToolCatalog.mergedVersionStringsNewestFirst(cached, AVAILABLE_GRADLE + OLD_GRADLE)
         }
-        return (bundled + ToolchainUpdateSites(context).cachedVersions(kind)).distinct().sorted()
+        Kind.SDK -> (AVAILABLE_SDK + ToolchainUpdateSites(context).cachedVersions(kind)).distinct().sorted()
+        Kind.NDK ->
+            BuildToolCatalog.ndkEntries(BuildToolCatalog.loadCached(context))
+                .map { it.version }
+        Kind.CMAKE ->
+            BuildToolCatalog.cmakeEntries(BuildToolCatalog.loadCached(context))
+                .map { it.version }
+        Kind.PYTHON -> (AVAILABLE_PYTHON + ToolchainUpdateSites(context).cachedVersions(kind)).distinct().sorted()
     }
 
     fun isInstalled(kind: Kind, version: String): Boolean =
@@ -377,10 +371,10 @@ class ToolchainManager(private val context: Context) {
             val gradleVersion = version.removePrefix("gradle-")
             "https://services.gradle.org/distributions/gradle-$gradleVersion-bin.zip"
         }
-        Kind.JDK -> when (version) {
-            "jdk-21" -> "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/jdk21-android-21.0.4/jdk21-android.tar.gz"
-            "jdk-17" -> "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/MobileStudio-JDK17-Android-ARM64/jdk17-android.tar.gz"
-            else -> null
+        Kind.JDK -> version.removePrefix("jdk-").toIntOrNull()?.let { major ->
+            // Dynamic catalog first (newest published build for this major),
+            // bundled legacy URLs as fallback via the catalog's merge.
+            BuildToolCatalog.findJdk(BuildToolCatalog.loadCached(context), major)?.url
         }
         Kind.SDK -> "https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip"
         Kind.NDK -> null  // NDK is resolved via Google SDK repository XML
@@ -399,12 +393,18 @@ class ToolchainManager(private val context: Context) {
 
     private fun externalKeyFor(kind: Kind): String = EXTERNAL_PREFIX + keyFor(kind)
 
+    /**
+     * Preferred default when no version is saved AND the version is actually
+     * installed — so the default tracks the NEWEST available tool without ever
+     * auto-changing an already-active installation (activeVersion checks the
+     * saved/installed state before consulting this).
+     */
     private fun preferredDefaultVersion(kind: Kind): String? = when (kind) {
         Kind.JDK -> DEFAULT_JDK
-        Kind.GRADLE -> DEFAULT_GRADLE
+        Kind.GRADLE -> availableVersions(Kind.GRADLE).firstOrNull() ?: DEFAULT_GRADLE
         Kind.SDK -> "android-34"
-        Kind.NDK -> "29.0.14206865"
-        Kind.CMAKE -> "3.22.1"
+        Kind.NDK -> availableVersions(Kind.NDK).firstOrNull() ?: AVAILABLE_NDK.firstOrNull()
+        Kind.CMAKE -> availableVersions(Kind.CMAKE).firstOrNull() ?: CmakeRuntimeManager.CMAKE_VERSION
         Kind.PYTHON -> AVAILABLE_PYTHON.lastOrNull()
     }
 

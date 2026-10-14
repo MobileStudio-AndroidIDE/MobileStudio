@@ -60,6 +60,21 @@ class OcSnapshot(private val context: Context) {
         File(rootDir, sessionId).deleteRecursively()
     }
 
+    /** Most recent pre-edit backup for [originalPath], or null when never snapshotted. */
+    fun latestBackup(sessionId: String, originalPath: String): File? {
+        val dir = File(rootDir, sessionId)
+        if (!dir.isDirectory) return null
+        val manifest = readManifest(dir)
+        for (i in manifest.length() - 1 downTo 0) {
+            val entry = manifest.optJSONObject(i) ?: continue
+            if (entry.optString("originalPath") == originalPath) {
+                val backup = File(dir, entry.optString("backup"))
+                if (backup.isFile) return backup
+            }
+        }
+        return null
+    }
+
     private fun readManifest(dir: File): JSONArray {
         val file = File(dir, "manifest.json")
         if (!file.isFile) return JSONArray()

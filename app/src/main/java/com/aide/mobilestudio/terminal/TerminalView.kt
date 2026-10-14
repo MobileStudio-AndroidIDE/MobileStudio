@@ -1908,6 +1908,15 @@ class TerminalView @JvmOverloads constructor(
      * ============================================================
      */
 
+    /**
+     * The prompt is drawn on the monospace grid, so its width is measured
+     * in columns (characters), never pixels. Reserve room after the prompt
+     * for the user to type so the prompt and the typed text never collide.
+     */
+    private fun availablePromptColumns(emulator: TerminalEmulator): Int =
+        (emulator.getCols() - PROMPT_TYPED_COLUMNS_RESERVED)
+            .coerceAtLeast(0)
+
     private fun drawDynamicPrompt(
         canvas: Canvas
     ) {
@@ -1960,7 +1969,9 @@ class TerminalView @JvmOverloads constructor(
         val prompt =
             currentSession
                 .promptManager
-                .formatPrompt()
+                .formatPrompt(
+                    availablePromptColumns(emulator)
+                )
 
         val line =
             emulator.getLine(cursorRow)
@@ -3299,6 +3310,12 @@ class TerminalView @JvmOverloads constructor(
 
         /** Delay of the follow-up pass that redraws the prompt after idle. */
         private const val PROMPT_IDLE_REFRESH_MS = PROMPT_IDLE_OUTPUT_MS + 60L
+
+        /**
+         * Columns kept free after the dynamic prompt so the prompt and the
+         * text the user types never collide, even at the narrowest width.
+         */
+        private const val PROMPT_TYPED_COLUMNS_RESERVED = 8
 
         /** Key codes with no Ctrl mapping: they release the latch. */
         private val CTRL_RELEASE_KEYCODES = setOf(

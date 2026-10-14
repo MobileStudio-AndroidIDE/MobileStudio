@@ -14,6 +14,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/**
+ * Superseded by [com.aide.mobilestudio.ai.opencode.agent.OcEngine], which the UI
+ * now uses. Kept for reference; not referenced by the shipping source set.
+ */
+@Deprecated("Use com.aide.mobilestudio.ai.opencode.agent.OcEngine instead")
 class AiAgentEngine(private val context: Context) {
     private val settings = AiSettings(context)
     private val storage = AiConversationStorage(context)

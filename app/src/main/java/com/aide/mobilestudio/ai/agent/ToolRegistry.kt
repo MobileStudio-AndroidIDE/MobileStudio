@@ -18,6 +18,9 @@ object ToolRegistry {
 
     private const val TAG = "ToolRegistry"
 
+    /** Legacy tools that mutate files; each invocation gets its own checkpoint turn. */
+    private val CHECKPOINTED_TOOLS = setOf("write_file", "write_files", "edit_file", "apply_patch", "edit_manifest")
+
     @Volatile
     private var currentProjectDir: File? = null
 
@@ -457,8 +460,32 @@ object ToolRegistry {
     private val undoStack = ArrayDeque<UndoEntry>()
     private const val MAX_UNDO = 50
 
+    // --- Checkpoints (/undo //redo): same pre-edit hook, persisted per turn ---
+    @Volatile
+    private var legacyCheckpointStore: CheckpointStore? = null
+    private val legacyTurnSeq = AtomicInteger(0)
+    @Volatile
+    private var activeLegacyTurn: String = ""
+
+    private fun checkpointStore(context: Context): CheckpointStore =
+        legacyCheckpointStore ?: CheckpointStore(File(context.filesDir, "ai/checkpoints")).also {
+            legacyCheckpointStore = it
+        }
+
     /** Copies the current file content into the undo stack before an AI write. */
     private fun backupBeforeWrite(context: Context, file: File) {
+        // Checkpoint FIRST and unconditionally: it deliberately supports paths
+        // that do not exist yet (content == null), which is what lets /undo
+        // delete a file the agent just created. Gating this on file.isFile
+        // would silently lose every newly created file.
+        runCatching {
+            checkpointStore(context).capture(
+                "legacy",
+                activeLegacyTurn.ifEmpty { "legacy-turn-${legacyTurnSeq.incrementAndGet()}" },
+                file,
+            )
+        }
+        // The legacy undo stack still needs a real file to copy a backup from.
         if (!file.exists() || !file.isFile) return
         try {
             val dir = File(context.filesDir, "AI/undo").apply { mkdirs() }
@@ -512,6 +539,11 @@ object ToolRegistry {
 
     fun executeTool(context: Context, nameParam: String, args: JSONObject, onResult: (String) -> Unit) {
         val name = normalizeToolName(nameParam)
+        // One checkpoint turn per mutating tool invocation, so write_files and
+        // similar multi-file tools roll back together.
+        if (name in CHECKPOINTED_TOOLS) {
+            activeLegacyTurn = "legacy-turn-${legacyTurnSeq.incrementAndGet()}"
+        }
         when (name) {
             "read_file" -> {
                 val path = args.getString("path")
@@ -717,8 +749,13 @@ object ToolRegistry {
                     val fileObj = files.getJSONObject(i)
                     val path = fileObj.getString("path")
                     val content = fileObj.getString("content")
+                    if (checkPathAllowed(context, path) != null) {
+                        results.add("Error writing $path: access outside the project is not allowed")
+                        continue
+                    }
                     try {
                         val file = File(path)
+                        backupBeforeWrite(context, file)
                         file.parentFile?.mkdirs()
                         file.writeText(content)
                         results.add("Successfully written to $path")

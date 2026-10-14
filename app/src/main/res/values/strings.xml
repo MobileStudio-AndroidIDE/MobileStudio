@@ -288,4 +288,9 @@
 
     <!-- Android shell -->
     <string name="shell_title">Android Shell</string>
+
+    <!-- Extension Hub: GitHub OAuth App client_id for Device Flow login.
+         Not a secret. Register at https://github.com/settings/developers and
+         enable "Device Flow". Users can also enter it at runtime in the Login dialog. -->
+    <string name="github_oauth_client_id" translatable="false"></string>
 </resources>

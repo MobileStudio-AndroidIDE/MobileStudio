@@ -34,6 +34,12 @@ object ThemeManager {
     fun setTheme(context: Context, theme: AppTheme) {
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .edit().putString(KEY_THEME, theme.name).apply()
+        // Refresh the process-wide imperative-UI palette immediately (via the
+        // same UiTheme.resolve() that MainActivity.onCreate uses — one source
+        // of truth) so any view built afterwards picks up the new theme even
+        // on screens that never call UiTheme.resolve() themselves and never
+        // get a recreate().
+        runCatching { UiTheme.resolve(context) }
     }
 
     fun getDarkMode(context: Context): DarkMode {

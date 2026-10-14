@@ -181,6 +181,18 @@
             android:screenOrientation="unspecified" />
 
         <activity
+            android:name=".ai.ui.AiWorkspaceActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ai.AiActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".TaskManagerActivity"
             android:exported="false"
             android:screenOrientation="unspecified"

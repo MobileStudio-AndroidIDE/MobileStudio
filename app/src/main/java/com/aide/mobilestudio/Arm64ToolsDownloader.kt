@@ -26,6 +26,10 @@ object Arm64ToolsDownloader {
     const val AAPT2_URL =
         "https://github.com/MobileStudio-AndroidIDE/StudioShellTools/releases/download/tools-v1/aapt2-android-arm64.tar.gz"
 
+    /** PIE (ET_DYN) arm64 ninja — runnable through /system/bin/linker64. */
+    const val NINJA_URL =
+        "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/Ninja_arm64/ninja"
+
     private data class ToolDef(
         val name: String,
         val url: String,
@@ -49,7 +53,7 @@ object Arm64ToolsDownloader {
         ),
         ToolDef(
             name = "ninja",
-            url = "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/Ninja_arm64/ninja",
+            url = NINJA_URL,
             fileName = "ninja"
         )
     )
@@ -144,6 +148,36 @@ object Arm64ToolsDownloader {
         return if (file.exists() && file.length() > 0) file else null
     }
 
+    /**
+     * Returns a runnable arm64 ninja ELF, downloading it when missing or when the
+     * cached copy is not a PIE (ET_DYN) — a non-PIE ET_EXEC cannot be launched via
+     * /system/bin/linker64 ("has unexpected e_type: 2"). Used by CmakeRuntimeManager
+     * to populate <toolchain>/cmake/<ver>/bin/ninja after a fresh reinstall.
+     */
+    fun ensureNinja(context: Context, onLog: ((String) -> Unit)? = null): File? {
+        val target = File(toolsDir(context), "ninja")
+        if (target.isFile && target.length() > 0L && isPieArm64Elf(target)) return target
+        if (target.exists()) target.delete()
+        return try {
+            onLog?.invoke("[Ninja] downloading arm64 ninja from $NINJA_URL")
+            downloadFile(NINJA_URL, target, onLog)
+            target.setExecutable(true, false)
+            try { Os.chmod(target.absolutePath, 0b111_101_101) } catch (_: Throwable) {}
+            if (!isPieArm64Elf(target)) {
+                onLog?.invoke("[Ninja] downloaded binary is not a PIE arm64 ELF")
+                target.delete()
+                null
+            } else {
+                onLog?.invoke("[Ninja] ready: ${target.absolutePath} (${target.length()} bytes)")
+                target
+            }
+        } catch (e: Exception) {
+            onLog?.invoke("[Ninja] download failed: ${e.message}")
+            target.delete()
+            null
+        }
+    }
+
     private fun linker64WrapperFor(target: File): String =
         "#!/system/bin/sh\nexec /system/bin/linker64 ${target.absolutePath} \"\$@\"\n"
 
@@ -164,6 +198,25 @@ object Arm64ToolsDownloader {
             ((hdr[18].toInt() and 0xff) shl 8) or (hdr[19].toInt() and 0xff)
         }
         return machine == 183
+    }
+
+    /** True for a PIE (ET_DYN, e_type=3) arm64 ELF — the only kind linker64 can load. */
+    private fun isPieArm64Elf(file: File): Boolean {
+        if (!isArm64Elf(file)) return false
+        val type = runCatching {
+            file.inputStream().use { input ->
+                val hdr = ByteArray(18)
+                var read = 0
+                while (read < hdr.size) {
+                    val n = input.read(hdr, read, hdr.size - read)
+                    if (n <= 0) break
+                    read += n
+                }
+                if (read < 18) return false
+                (hdr[16].toInt() and 0xff) or ((hdr[17].toInt() and 0xff) shl 8)
+            }
+        }.getOrDefault(-1)
+        return type == 3
     }
 
     private fun writeExecutableText(file: File, text: String) {

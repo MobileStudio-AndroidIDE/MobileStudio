@@ -541,15 +541,33 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
         val currentTheme = ThemeManager.getTheme(this)
         val items = themes.map { it.label }.toTypedArray()
         val checkedIndex = themes.indexOfFirst { it == currentTheme }
+        val isKo = AppLanguage.isKorean(this)
 
         AlertDialog.Builder(this)
-            .setTitle(if (AppLanguage.isKorean(this)) "테마 선택" else "Select Theme")
-            .setSingleChoiceItems(items, checkedIndex) { _, which ->
+            .setTitle(if (isKo) "테마 선택" else "Select Theme")
+            .setSingleChoiceItems(items, checkedIndex) { dialog, which ->
                 val selectedTheme = themes[which]
-                ThemeManager.setTheme(this@MainActivity, selectedTheme)
-                recreate()
+                if (selectedTheme == currentTheme) {
+                    dialog.dismiss()
+                    return@setSingleChoiceItems
+                }
+                // Ask before applying: the theme is only persisted once the
+                // user confirms, so declining leaves the current theme fully
+                // intact (no half-restyled UI).
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle(if (isKo) "테마 변경" else "Change Theme")
+                    .setMessage(
+                        if (isKo) "테마를 바꾸려면 앱을 재시작해야 합니다."
+                        else "The app needs to restart to apply the new theme."
+                    )
+                    .setPositiveButton(if (isKo) "네, 재시작하겠습니다" else "Yes, restart now") { _, _ ->
+                        ThemeManager.setTheme(this@MainActivity, selectedTheme)
+                        recreate()
+                    }
+                    .setNegativeButton(if (isKo) "아니요, 나중에 다시 시도하겠습니다" else "No, try again later", null)
+                    .show()
             }
-            .setNegativeButton(if (AppLanguage.isKorean(this)) "취소" else "Cancel", null)
+            .setNegativeButton(if (isKo) "취소" else "Cancel", null)
             .show()
     }
 

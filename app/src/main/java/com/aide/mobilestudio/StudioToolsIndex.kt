@@ -233,7 +233,12 @@ object StudioToolsIndex {
         return ToolIndex(tools, System.currentTimeMillis())
     }
 
-    private fun downloadText(urlStr: String): String? = runCatching {
+    /**
+     * HTTP(S) GET returning the body as text, with the GitHub API headers.
+     * Returns null on any failure. Shared with BuildToolCatalog so the whole
+     * app uses one consistent fetch path.
+     */
+    fun downloadText(urlStr: String): String? = runCatching {
         val conn = URL(urlStr).openConnection() as HttpURLConnection
         conn.connectTimeout = 15_000
         conn.readTimeout = 30_000

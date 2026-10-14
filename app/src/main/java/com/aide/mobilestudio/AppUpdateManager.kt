@@ -11,12 +11,13 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONArray
-import org.json.JSONObject
 
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
     private const val GITHUB_REPO = "MobileStudio-AndroidIDE/MobileStudio_AndroidIDE"
     private const val GITHUB_API = "https://api.github.com/repos/$GITHUB_REPO/releases?per_page=100"
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     data class UpdateInfo(
         val latestVersion: String,
@@ -37,15 +38,25 @@ object AppUpdateManager {
 
     fun clearCache() { cachedUpdate = null }
 
+    /**
+     * Scans every release asset that looks like an APK (any file name) and
+     * reports the newest build — see [AppUpdateVersionLogic] for the rules.
+     * The current build is resolved from PackageManager unless
+     * [installedOverride] is supplied, which lets callers (and tests) inject
+     * the installed version instead. Never throws; any failure is a silent
+     * onResult(null). Results are posted on the main looper.
+     */
     fun checkForUpdates(
         context: Context,
         currentVersionName: String,
+        installedOverride: AppUpdateVersionLogic.BuildVersion? = null,
         onResult: (UpdateInfo?) -> Unit
     ) {
-        if (isChecking) { onResult(null); return }
+        if (isChecking) { mainHandler.post { onResult(null) }; return }
         isChecking = true
 
         Thread {
+            var result: UpdateInfo? = null
             try {
                 val conn = URL(GITHUB_API).openConnection() as HttpURLConnection
                 conn.connectTimeout = 10000
@@ -56,80 +67,91 @@ object AppUpdateManager {
                 if (conn.responseCode != 200) {
                     Log.w(TAG, "releases list HTTP ${conn.responseCode}")
                     conn.disconnect()
-                    isChecking = false
-                    onResult(null)
-                    return@Thread
-                }
+                } else {
+                    val json = conn.inputStream.bufferedReader().readText()
+                    conn.disconnect()
 
-                val json = conn.inputStream.bufferedReader().readText()
-                conn.disconnect()
-
-                val releases = JSONArray(json)
-
-                var bestTag: String? = null
-                var bestInfo: UpdateInfo? = null
-
-                for (i in 0 until releases.length()) {
-                    val release = releases.getJSONObject(i)
-                    if (release.optBoolean("draft", false)) continue
-                    if (release.optBoolean("prerelease", false)) continue
-
-                    val tagName = release.optString("tag_name", "").removePrefix("v")
-                    if (tagName.isBlank()) continue
-
-                    val assets = release.optJSONArray("assets") ?: JSONArray()
-                    var apkUrl: String? = null
-                    var apkSize: Long = 0
-                    for (j in 0 until assets.length()) {
-                        val asset = assets.getJSONObject(j)
-                        val name = asset.optString("name", "")
-                        if (!name.endsWith(".apk")) continue
-                        val prefUrl = asset.optString("browser_download_url")
-                        if (prefUrl.isBlank()) continue
-                        if (name.startsWith("MobileStudio_") || apkUrl == null) {
-                            apkUrl = prefUrl
-                            apkSize = asset.optLong("size", 0)
+                    val releases = JSONArray(json)
+                    val best = AppUpdateVersionLogic.selectBestApk(collectApkCandidates(releases))
+                    if (best != null) {
+                        val installed = installedOverride
+                            ?: resolveInstalledBuild(context, currentVersionName)
+                        if (AppUpdateVersionLogic.isNewer(installed, best.version)) {
+                            result = UpdateInfo(
+                                latestVersion = AppUpdateVersionLogic.displayVersion(best.version),
+                                latestTag = best.tag,
+                                apkUrl = best.downloadUrl,
+                                releaseNotes = best.releaseBody,
+                                apkSize = best.sizeBytes,
+                                publishedAt = best.releasePublishedAtIso
+                            )
                         }
-                        if (name.startsWith("MobileStudio_")) break
-                    }
-                    if (apkUrl == null) continue
-
-                    if (bestTag == null || isNewerVersion(bestTag, tagName)) {
-                        bestTag = tagName
-                        bestInfo = UpdateInfo(
-                            latestVersion = tagName,
-                            latestTag = tagName,
-                            apkUrl = apkUrl!!,
-                            releaseNotes = release.optString("body", ""),
-                            apkSize = apkSize,
-                            publishedAt = release.optString("published_at", "")
-                        )
                     }
                 }
-
-                isChecking = false
-                val info = bestInfo ?: run {
-                    onResult(null)
-                    return@Thread
-                }
-
-                val currentNumeric = currentVersionName.split(" ").firstOrNull() ?: ""
-
-                if (!isNewerVersion(currentNumeric, info.latestTag)) {
-                    onResult(null)
-                    return@Thread
-                }
-
-                cachedUpdate = info
-                onResult(info)
             } catch (e: Exception) {
                 Log.w(TAG, "checkForUpdates failed: ${e.message}")
+            } finally {
                 isChecking = false
-                onResult(null)
+                val info = result
+                cachedUpdate = info
+                mainHandler.post { onResult(info) }
             }
         }.apply { isDaemon = true; start() }
     }
 
+    /**
+     * The installed build as a comparable version: the yy.M.d token of
+     * [versionNameHint] (or PackageInfo.versionName when the hint is blank)
+     * when one is present, otherwise lastUpdateTime as the timestamp
+     * baseline. PackageManager failures degrade to an epoch baseline rather
+     * than crashing.
+     */
+    fun resolveInstalledBuild(
+        context: Context,
+        versionNameHint: String? = null
+    ): AppUpdateVersionLogic.BuildVersion {
+        val pi = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }.getOrNull()
+        val text = versionNameHint?.takeIf { it.isNotBlank() } ?: pi?.versionName
+        return AppUpdateVersionLogic.buildVersion(text, pi?.lastUpdateTime ?: 0L)
+    }
+
+    /** Every .apk asset of every published (non-draft, non-prerelease) release. */
+    private fun collectApkCandidates(releases: JSONArray): List<AppUpdateVersionLogic.ApkCandidate> {
+        val candidates = ArrayList<AppUpdateVersionLogic.ApkCandidate>()
+        for (i in 0 until releases.length()) {
+            val release = releases.optJSONObject(i) ?: continue
+            if (release.optBoolean("draft", false)) continue
+            if (release.optBoolean("prerelease", false)) continue
+
+            val assets = release.optJSONArray("assets") ?: continue
+            for (j in 0 until assets.length()) {
+                val asset = assets.optJSONObject(j) ?: continue
+                val name = asset.optString("name", "")
+                val url = asset.optString("browser_download_url", "")
+                if (!AppUpdateVersionLogic.isApkAsset(name) || url.isBlank()) continue
+                candidates.add(
+                    AppUpdateVersionLogic.ApkCandidate(
+                        assetName = name,
+                        downloadUrl = url,
+                        sizeBytes = asset.optLong("size", 0),
+                        tag = release.optString("tag_name", ""),
+                        releaseName = release.optString("name", ""),
+                        assetUpdatedAtIso = asset.optString("updated_at", ""),
+                        releasePublishedAtIso = release.optString("published_at", ""),
+                        releaseBody = release.optString("body", "")
+                    )
+                )
+            }
+        }
+        return candidates
+    }
+
+    /**
+     * Legacy numeric dotted-version comparison, kept for compatibility;
+     * new code should compare [AppUpdateVersionLogic.BuildVersion] values.
+     */
     fun isNewerVersion(current: String, latest: String): Boolean {
         val curParts = current.split(".").map { it.toIntOrNull() ?: 0 }
         val latParts = latest.split(".").map { it.toIntOrNull() ?: 0 }
@@ -142,56 +164,80 @@ object AppUpdateManager {
         return false
     }
 
+    /**
+     * Downloads [info]'s APK into the app's external files dir (cacheDir when
+     * external storage is unavailable), reporting progress as 0-100. When the
+     * download completes the system installer is launched via a FileProvider
+     * ACTION_VIEW intent (authority "${packageName}.provider", no extra
+     * manifest entries needed); [onInstallStarted] fires on the main thread
+     * right after that intent is fired so the caller can dismiss progress UI,
+     * and [onDone] always fires exactly once on the main thread.
+     */
     fun downloadAndInstall(
         context: Context,
         info: UpdateInfo,
         onProgress: (Int) -> Unit,
+        onInstallStarted: () -> Unit = {},
         onDone: (Boolean, String?) -> Unit
     ) {
         Thread {
+            var apkFile: File? = null
             try {
-                val apkFile = File(context.cacheDir, "update_${info.latestTag}.apk")
-                apkFile.delete()
+                val dir = context.getExternalFilesDir(null) ?: context.cacheDir
+                val versionLabel = info.latestVersion.ifBlank { info.latestTag }
+                val fileName = "update_" +
+                    versionLabel.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".apk"
+                val file = File(dir, fileName)
+                apkFile = file
+                file.delete()
 
                 val conn = URL(info.apkUrl).openConnection() as HttpURLConnection
                 conn.connectTimeout = 15000
                 conn.readTimeout = 60000
                 conn.instanceFollowRedirects = true
+                conn.setRequestProperty("User-Agent", "MobileStudio-AndroidIDE")
                 conn.connect()
 
                 if (conn.responseCode !in 200..299) {
+                    val code = conn.responseCode
                     conn.disconnect()
-                    onDone(false, "HTTP ${conn.responseCode}")
+                    mainHandler.post { onDone(false, "HTTP $code") }
                     return@Thread
                 }
 
                 val total = conn.contentLengthLong
                 val input = conn.inputStream
-                val output = FileOutputStream(apkFile)
+                val output = FileOutputStream(file)
                 val buffer = ByteArray(64 * 1024)
                 var downloaded = 0L
-
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    downloaded += read
-                    if (total > 0) {
-                        onProgress((downloaded * 100 / total).toInt())
+                try {
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                        downloaded += read
+                        if (total > 0) onProgress((downloaded * 100 / total).toInt())
                     }
+                } finally {
+                    output.close()
+                    input.close()
+                    conn.disconnect()
                 }
-                output.close()
-                input.close()
-                conn.disconnect()
+
+                if (total > 0 && downloaded != total) {
+                    file.delete()
+                    mainHandler.post { onDone(false, "Incomplete download ($downloaded/$total bytes)") }
+                    return@Thread
+                }
 
                 onProgress(100)
 
-                Handler(Looper.getMainLooper()).post {
+                mainHandler.post {
                     try {
                         val uri = FileProvider.getUriForFile(
                             context,
                             "${context.packageName}.provider",
-                            apkFile
+                            file
                         )
                         val intent = Intent(Intent.ACTION_VIEW).apply {
                             setDataAndType(uri, "application/vnd.android.package-archive")
@@ -200,13 +246,15 @@ object AppUpdateManager {
                             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                         }
                         context.startActivity(intent)
+                        onInstallStarted()
                         onDone(true, null)
                     } catch (e: Exception) {
                         onDone(false, e.message)
                     }
                 }
             } catch (e: Exception) {
-                onDone(false, e.message)
+                apkFile?.delete()
+                mainHandler.post { onDone(false, e.message) }
             }
         }.apply { isDaemon = true; start() }
     }

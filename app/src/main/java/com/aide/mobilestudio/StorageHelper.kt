@@ -44,9 +44,25 @@ object StorageHelper {
     fun projectDir(context: Context, name: String): File =
         File(projectsRoot(context), name).also { it.mkdirs() }
 
+    private val PROJECT_MARKERS = listOf(
+        "build.gradle", "build.gradle.kts",
+        "settings.gradle", "settings.gradle.kts",
+        "pom.xml", "CMakeLists.txt", "AndroidManifest.xml",
+        "extension.json", "package.json", ".git", "src", "app"
+    )
+
+    /** 프로젝트로 인식할 수 있는 마커가 있는 디렉터리만 프로젝트로 취급한다.
+     *  (없으면 빌드 출력 디렉터리예: `packages` 가 "최근 프로젝트"에 섞여 나온다) */
+    fun looksLikeProject(dir: File): Boolean =
+        PROJECT_MARKERS.any { marker ->
+            val f = File(dir, marker)
+            (f.isFile || (marker == ".git" && f.isDirectory)) && f.exists()
+        }
+
     fun listProjects(context: Context): List<File> =
         listOf(projectsRoot(context), internalProjectsRoot(context))
             .flatMap { it.listFiles { f -> f.isDirectory }?.toList().orEmpty() }
+            .filter { looksLikeProject(it) }
             .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
             .sortedByDescending { it.lastModified() }
 

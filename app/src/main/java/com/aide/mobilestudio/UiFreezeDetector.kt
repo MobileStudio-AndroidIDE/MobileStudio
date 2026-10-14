@@ -34,6 +34,22 @@ class UiFreezeDetector(private val context: Context) {
         private const val CRITICAL_THRESHOLD_MS = 3000L
         private const val HEARTBEAT_INTERVAL_MS = 200L
         private const val HEARTBEAT_TIMEOUT_MS = 500L
+
+        /** Pure duration formatting (JVM-testable): 999 -> "999ms", 1500 -> "1.5s", 125000 -> "2m 5s". */
+        fun formatDuration(ms: Long): String = when {
+            ms < 1000 -> "${ms}ms"
+            ms < 60000 -> String.format("%.1fs", ms / 1000.0)
+            else -> String.format("%dm %ds", ms / 60000, (ms % 60000) / 1000)
+        }
+
+        private fun diagnosticsDir(context: Context): File =
+            File(context.filesDir, RunMarkerLogic.DIAGNOSTICS_DIR)
+
+        fun heartbeatMarkerFile(context: Context): File =
+            File(diagnosticsDir(context), RunMarkerLogic.HEARTBEAT_MARKER_NAME)
+
+        fun cleanExitMarkerFile(context: Context): File =
+            File(diagnosticsDir(context), RunMarkerLogic.CLEAN_EXIT_MARKER_NAME)
     }
 
     interface FreezeListener {
@@ -64,8 +80,26 @@ class UiFreezeDetector(private val context: Context) {
 
     fun startMonitoring(activity: Activity) {
         if (isMonitoring) return
+        // A stopMonitoring() -> startMonitoring() cycle happens on every
+        // onPause()/onResume() around app switches. A heartbeat that was in
+        // flight when the activity paused never ran its timeout callback
+        // (stopMonitoring cancels it), which used to leave heartbeatPending
+        // stuck at true; on resume every sendHeartbeat then took the early
+        // "pending" branch and incremented consecutiveFailures every 200ms
+        // WITHOUT ever pinging the main thread — crossing the 3s critical
+        // threshold ~3s after returning to the app even though nothing froze.
+        // Cancel any stale pending timeout first, then reset ALL state.
+        mainHandler.removeCallbacksAndMessages(null)
+        watchdogHandler.removeCallbacksAndMessages(null)
+        heartbeatPending.set(false)
+        heartbeatToken.set(false)
+        consecutiveFailures.set(0)
+        isFrozen = false
+        warningShown = false
+        freezeStartTime = 0L
         isMonitoring = true
         activityRef = WeakReference(activity)
+        reportPreviousRunIfNeeded()
         Log.i(TAG, "Freeze detector started")
         scheduleHeartbeat()
     }
@@ -74,8 +108,78 @@ class UiFreezeDetector(private val context: Context) {
         isMonitoring = false
         mainHandler.removeCallbacksAndMessages(null)
         watchdogHandler.removeCallbacksAndMessages(null)
+        writeRunMarkers()
         hideOverlayOnMainThread()
         Log.i(TAG, "Freeze detector stopped")
+    }
+
+    /**
+     * onPause/onDestroy checkpoint: record "last known alive" (uptime + wall)
+     * plus a clean-exit marker so the next launch can tell how the previous
+     * process ended instead of silently losing the information.
+     */
+    private fun writeRunMarkers() {
+        runCatching {
+            val marker = RunMarkerLogic.encode(
+                android.os.Process.myPid(),
+                SystemClock.uptimeMillis(),
+                System.currentTimeMillis()
+            )
+            val dir = File(context.filesDir, RunMarkerLogic.DIAGNOSTICS_DIR)
+            dir.mkdirs()
+            heartbeatMarkerFile(context).writeText(marker)
+            // Clean checkpoint: the process paused/finished normally, so an
+            // abnormal death after this point happened in the background.
+            cleanExitMarkerFile(context).writeText(marker)
+        }
+    }
+
+    /**
+     * onResume: interpret the markers written by the previous process.
+     * DIED_IN_BACKGROUND is reported here (log + durable record); a
+     * foreground death is surfaced by MobileStudioCrashGuard at install time.
+     * Returning to the foreground then invalidates the clean-exit marker, so
+     * an abnormal death from here on is correctly reported as a foreground
+     * end on the next launch.
+     */
+    private fun reportPreviousRunIfNeeded() {
+        runCatching {
+            val marker = heartbeatMarkerFile(context).takeIf { it.isFile }
+                ?.let { RunMarkerLogic.decode(it.readText()) }
+            val cleanExitPresent = cleanExitMarkerFile(context).isFile
+            val verdict = RunMarkerLogic.evaluate(
+                marker,
+                android.os.Process.myPid(),
+                SystemClock.uptimeMillis(),
+                cleanExitPresent
+            )
+            when (verdict) {
+                RunMarkerLogic.Verdict.DIED_IN_BACKGROUND -> {
+                    Log.e(TAG, "Previous app process was terminated while backgrounded " +
+                        "(checkpoint uptime=${marker?.uptimeMs}ms, wall=${marker?.wallMs})")
+                    recordBackgroundKill(marker)
+                }
+                RunMarkerLogic.Verdict.DIED_IN_FOREGROUND ->
+                    Log.e(TAG, "Previous app process terminated while in the foreground " +
+                        "(crash guard surfaces the user notice)")
+                RunMarkerLogic.Verdict.REBOOTED ->
+                    Log.i(TAG, "Device rebooted since the previous session")
+                else -> {}
+            }
+            cleanExitMarkerFile(context).delete()
+        }
+    }
+
+    private fun recordBackgroundKill(marker: RunMarkerLogic.HeartbeatMarker?) {
+        runCatching {
+            val dir = File(context.filesDir, RunMarkerLogic.DIAGNOSTICS_DIR)
+            dir.mkdirs()
+            File(dir, "last_background_kill.txt").writeText(
+                "Previous process (pid=${marker?.pid}) was terminated while backgrounded; " +
+                    "checkpoint uptime=${marker?.uptimeMs}ms wall=${marker?.wallMs}; " +
+                    "detected at uptime=${SystemClock.uptimeMillis()}ms wall=${System.currentTimeMillis()}\n"
+            )
+        }
     }
 
     private fun scheduleHeartbeat() {
@@ -99,14 +203,14 @@ class UiFreezeDetector(private val context: Context) {
 
             if (estimatedBlockMs >= CRITICAL_THRESHOLD_MS && !isFrozen) {
                 isFrozen = true
-                freezeStartTime = System.currentTimeMillis() - estimatedBlockMs
+                freezeStartTime = SystemClock.uptimeMillis() - estimatedBlockMs
                 Log.e(TAG, "UI FREEZE detected: ~${estimatedBlockMs}ms")
                 listener?.onFreezeDetected(estimatedBlockMs)
                 showOverlayOnMainThread(estimatedBlockMs)
             }
 
             if (isFrozen) {
-                val duration = System.currentTimeMillis() - freezeStartTime
+                val duration = SystemClock.uptimeMillis() - freezeStartTime
                 updateOverlayDuration(duration)
             }
 
@@ -136,20 +240,20 @@ class UiFreezeDetector(private val context: Context) {
 
                 if (estimatedBlockMs >= CRITICAL_THRESHOLD_MS && !isFrozen) {
                     isFrozen = true
-                    freezeStartTime = System.currentTimeMillis() - estimatedBlockMs
+                    freezeStartTime = SystemClock.uptimeMillis() - estimatedBlockMs
                     Log.e(TAG, "UI FREEZE detected: ~${estimatedBlockMs}ms")
                     listener?.onFreezeDetected(estimatedBlockMs)
                     showOverlayOnMainThread(estimatedBlockMs)
                 }
 
                 if (isFrozen) {
-                    val duration = System.currentTimeMillis() - freezeStartTime
+                    val duration = SystemClock.uptimeMillis() - freezeStartTime
                     updateOverlayDuration(duration)
                 }
             } else {
                 consecutiveFailures.set(0)
                 if (isFrozen) {
-                    val duration = System.currentTimeMillis() - freezeStartTime
+                    val duration = SystemClock.uptimeMillis() - freezeStartTime
                     isFrozen = false
                     warningShown = false
                     Log.i(TAG, "UI freeze resolved after ${duration}ms")
@@ -384,7 +488,7 @@ class UiFreezeDetector(private val context: Context) {
         return buildString {
             appendLine("=== MobileStudio UI Freeze Thread Dump ===")
             appendLine("Timestamp: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())}")
-            appendLine("Freeze duration: ${formatDuration(System.currentTimeMillis() - freezeStartTime)}")
+            appendLine("Freeze duration: ${formatDuration(SystemClock.uptimeMillis() - freezeStartTime)}")
             appendLine()
 
             val allThreads = Thread.getAllStackTraces()
@@ -489,14 +593,6 @@ class UiFreezeDetector(private val context: Context) {
         }
     }
 
-    private fun formatDuration(ms: Long): String {
-        return when {
-            ms < 1000 -> "${ms}ms"
-            ms < 60000 -> String.format("%.1fs", ms / 1000.0)
-            else -> String.format("%dm %ds", ms / 60000, (ms % 60000) / 1000)
-        }
-    }
-
     fun destroy() {
         stopMonitoring()
         watchdogThread.quitSafely()
@@ -504,4 +600,110 @@ class UiFreezeDetector(private val context: Context) {
             watchdogThread.join(1000)
         } catch (_: Exception) {}
     }
+}
+
+/**
+ * Pure, JVM-testable logic for the run-state markers shared by
+ * [UiFreezeDetector] and [MobileStudioCrashGuard].
+ *
+ * Two tiny marker files under filesDir/diagnostics record how the previous
+ * process ended:
+ *  - ui_heartbeat.marker: written whenever monitoring stops (onPause/onDestroy),
+ *    with the current uptime AND wall clock.
+ *  - clean-exit.marker: a clean checkpoint, written on the same events and
+ *    cleared when the app returns to the foreground or crashes.
+ *
+ * At the next launch, a heartbeat marker from a dead pid plus a PRESENT
+ * clean-exit marker means the previous process died in the background
+ * (LMK/OOM while cached — reported by the freeze detector). A MISSING
+ * clean-exit marker means the previous process died in the foreground
+ * (uncaught exception, ANR-then-kill, OOM kill — surfaced to the user by the
+ * crash guard). A heartbeat marker whose uptime is in the future means the
+ * device rebooted, which is not the app's fault.
+ */
+object RunMarkerLogic {
+    const val DIAGNOSTICS_DIR = "diagnostics"
+    const val HEARTBEAT_MARKER_NAME = "ui_heartbeat.marker"
+    const val CLEAN_EXIT_MARKER_NAME = "clean-exit.marker"
+
+    /** Slack for the reboot check: uptime must have gone backwards to count. */
+    const val REBOOT_SLACK_MS = 2_000L
+
+    data class HeartbeatMarker(val pid: Int, val uptimeMs: Long, val wallMs: Long) {
+        fun encode(): String = "pid=$pid;uptime=$uptimeMs;wall=$wallMs"
+    }
+
+    enum class Verdict {
+        /** No marker recorded yet (first run). */
+        NO_MARKER,
+        /** Marker belongs to this process: ordinary pause/resume cycle. */
+        SAME_PROCESS,
+        /** Marker uptime is in the future: the device rebooted since. */
+        REBOOTED,
+        /** Previous process's last lifecycle event was a clean checkpoint. */
+        DIED_IN_BACKGROUND,
+        /** Previous process's last lifecycle event was a foreground resume. */
+        DIED_IN_FOREGROUND
+    }
+
+    fun encode(pid: Int, uptimeMs: Long, wallMs: Long): String =
+        HeartbeatMarker(pid, uptimeMs, wallMs).encode()
+
+    fun decode(text: String): HeartbeatMarker? {
+        val fields = text.trim()
+            .split(';')
+            .mapNotNull { part ->
+                val idx = part.indexOf('=')
+                if (idx <= 0) return@mapNotNull null
+                part.substring(0, idx).trim() to part.substring(idx + 1).trim()
+            }
+            .toMap()
+        val pid = fields["pid"]?.toIntOrNull() ?: return null
+        val uptime = fields["uptime"]?.toLongOrNull() ?: return null
+        val wall = fields["wall"]?.toLongOrNull() ?: return null
+        return HeartbeatMarker(pid, uptime, wall)
+    }
+
+    fun heartbeatMarkerFile(filesDir: File): File =
+        File(File(filesDir, DIAGNOSTICS_DIR), HEARTBEAT_MARKER_NAME)
+
+    fun cleanExitMarkerFile(filesDir: File): File =
+        File(File(filesDir, DIAGNOSTICS_DIR), CLEAN_EXIT_MARKER_NAME)
+
+    /**
+     * Decide what happened to the process that wrote [marker].
+     *
+     * @param currentPid pid of the process evaluating the marker
+     * @param nowUptimeMs current [android.os.SystemClock.uptimeMillis]; uptime
+     *   stops during deep sleep and resets on reboot, so "marker uptime in the
+     *   future" can only mean a reboot, while "wall far ahead of uptime" is
+     *   just deep sleep (never a reboot, never a freeze).
+     * @param cleanExitMarkerPresent whether the previous process's last known
+     *   lifecycle event was a clean checkpoint (background/onDestroy)
+     */
+    fun evaluate(
+        marker: HeartbeatMarker?,
+        currentPid: Int,
+        nowUptimeMs: Long,
+        cleanExitMarkerPresent: Boolean
+    ): Verdict = when {
+        marker == null -> Verdict.NO_MARKER
+        marker.uptimeMs > nowUptimeMs + REBOOT_SLACK_MS -> Verdict.REBOOTED
+        marker.pid == currentPid -> Verdict.SAME_PROCESS
+        cleanExitMarkerPresent -> Verdict.DIED_IN_BACKGROUND
+        else -> Verdict.DIED_IN_FOREGROUND
+    }
+
+    /**
+     * One-line user notice for an abnormal previous run. Pure so it can be
+     * unit-tested.
+     */
+    fun abnormalExitNotice(isKorean: Boolean, latestCrashLogName: String?): String =
+        if (isKorean) {
+            if (latestCrashLogName != null) "이전 실행이 비정상 종료되었습니다. 로그: $latestCrashLogName"
+            else "이전 실행이 비정상 종료되었습니다. 기록된 크래시 로그가 없습니다."
+        } else {
+            if (latestCrashLogName != null) "Previous run terminated unexpectedly — crash log: $latestCrashLogName"
+            else "Previous run terminated unexpectedly. No crash log was recorded."
+        }
 }

@@ -61,7 +61,9 @@ data class CommunityPoll(
 )
 
 class SupabaseCommunityClient(private val context: Context) {
-    private val prefs = context.getSharedPreferences("supabase_community", Context.MODE_PRIVATE)
+    private val prefs = SecurePrefs.get(context, "supabase_community_secure").also {
+        SecurePrefs.migrateAll(context, "supabase_community", it)
+    }
 
     val projectUrl: String get() = prefs.getString("url", DEFAULT_PROJECT_URL).orEmpty()
     val anonKey: String get() = prefs.getString("anon_key", DEFAULT_ANON_KEY).orEmpty()

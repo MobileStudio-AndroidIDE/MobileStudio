@@ -34,7 +34,16 @@ import com.aide.mobilestudio.ai.agent.ModelManager
 import com.aide.mobilestudio.ai.agent.HardwareManager
 import com.aide.mobilestudio.ai.agent.ToolRegistry
 import com.aide.mobilestudio.ai.opencode.command.OcCommandInfo
+import com.aide.mobilestudio.ai.opencode.session.OcMessage
 import com.aide.mobilestudio.ai.opencode.session.OcSessionStore
+import com.aide.mobilestudio.ai.agent.CheckpointOutcome
+import com.aide.mobilestudio.ai.agent.ProjectFiles
+import com.aide.mobilestudio.ai.agent.PromptContextBadge
+import com.aide.mobilestudio.ai.agent.StatusLine
+import com.aide.mobilestudio.ai.command.SlashCommand
+import com.aide.mobilestudio.ai.command.SlashCommandAction
+import com.aide.mobilestudio.ai.command.SlashCommandRegistry
+import com.aide.mobilestudio.ai.command.SlashInvocation
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.*
@@ -57,6 +66,15 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
     private var slashPopup: ListPopupWindow? = null
     private var slashMatches: List<OcCommandInfo> = emptyList()
     private var slashCommandCache: List<OcCommandInfo>? = null
+    private val slashRegistry = SlashCommandRegistry()
+    private var slashLocalMatches: List<SlashCommand> = emptyList()
+    private var mentionPopup: ListPopupWindow? = null
+    private var mentionFiles: List<String> = emptyList()
+    private var mentionFilesRoot: File? = null
+    private var mentionFilesLoading = false
+    private var activeMentionToken: String? = null
+    private lateinit var modeSelector: Spinner
+    private lateinit var contextBadge: TextView
     private val thinkingText: TextView
     private val thinkingCard: LinearLayout
     private val thinkingHeader: TextView
@@ -204,7 +222,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         }
 
         // Agent mode selector (build/plan/explore)
-        val modeSelector = Spinner(context).apply {
+        modeSelector = Spinner(context).apply {
             id = View.generateViewId()
             val modes = listOf("Build (Full Access)", "Plan (Read-Only)", "Explore (Fast)")
             adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, modes)
@@ -228,20 +246,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         val newConvBtn = ImageButton(context).apply {
             setImageResource(android.R.drawable.ic_menu_add)
             background = null
-            setOnClickListener {
-                engine.newSession()
-                outputContainer.removeAllViews()
-                commandOutputContainer.removeAllViews()
-                commandOutputScroll.visibility = View.GONE
-                planToggle.visibility = View.GONE
-                planContainer.visibility = View.GONE
-                thinkingText.text = "AI Agent Ready"
-                thinkingCard.visibility = View.GONE
-                thinkingLiveBuf.setLength(0)
-                thinkingLiveDone = true
-                updateTokenCount()
-                addMessage("system", "Started a new conversation.")
-            }
+            setOnClickListener { startNewConversation() }
         }
         val historyBtn = ImageButton(context).apply {
             setImageResource(android.R.drawable.ic_menu_recent_history)
@@ -480,6 +485,17 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         }
         addView(approvalContainer)
 
+        // Context badge: compact "what will be sent" line above the input
+        // (open editor file · @mention count · rough token size).
+        contextBadge = TextView(context).apply {
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setTextColor(StudioUi.palette.muted)
+            setPadding(dp(12), dp(2), dp(12), dp(2))
+            visibility = GONE
+        }
+        addView(contextBadge)
+
         // Input
         val inputRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
@@ -521,7 +537,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
                 override fun afterTextChanged(s: android.text.Editable?) {
-                    updateSlashSuggestions(s?.toString() ?: "")
+                    val text = s?.toString() ?: ""
+                    updateSlashSuggestions(text)
+                    updateMentionSuggestions(text)
+                    updateContextBadge(text)
                 }
             })
         }
@@ -841,6 +860,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 post { appendCommandOutput(line) }
             }
 
+            override fun onNotice(text: String) {
+                post { addMessage("system", text) }
+            }
+
             override fun onTodos(todos: JSONArray) {
                 post {
                     if (todos.length() == 0) return@post
@@ -1015,31 +1038,42 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             return
         }
         val query = text.substring(1)
+        slashLocalMatches = slashRegistry.filter(query)
         val commands = slashCommandCache
             ?: runCatching { engine.listCommands() }.getOrDefault(emptyList()).also { slashCommandCache = it }
         slashMatches = commands.filter { cmd ->
             cmd.name.startsWith(query, ignoreCase = true) ||
                 (cmd.description ?: "").contains(query, ignoreCase = true)
         }
-        if (slashMatches.isEmpty()) {
+        if (slashLocalMatches.isEmpty() && slashMatches.isEmpty()) {
             hideSlashSuggestions()
             return
         }
-        val labels = slashMatches.map { cmd ->
+        val labels = ArrayList<String>(slashLocalMatches.size + slashMatches.size)
+        slashLocalMatches.forEach { labels.add("/${it.name}  —  ${it.description}") }
+        slashMatches.forEach { cmd ->
             val desc = cmd.description
-            if (desc.isNullOrBlank()) "/${cmd.name}" else "/${cmd.name}  —  $desc"
+            labels.add(if (desc.isNullOrBlank()) "/${cmd.name}" else "/${cmd.name}  —  $desc")
         }
         val popup = slashPopup ?: ListPopupWindow(context).apply {
             anchorView = inputField
             isModal = false
             setOnItemClickListener { _, _, position, _ ->
-                val cmd = slashMatches.getOrNull(position) ?: return@setOnItemClickListener
-                inputField.setText("/${cmd.name} ")
-                inputField.setSelection(inputField.text.length)
                 hideSlashSuggestions()
+                val local = slashLocalMatches.getOrNull(position)
+                if (local != null) {
+                    inputField.setText("")
+                    runSlashCommand(local)
+                } else {
+                    val cmd = slashMatches.getOrNull(position - slashLocalMatches.size)
+                        ?: return@setOnItemClickListener
+                    inputField.setText("/${cmd.name} ")
+                    inputField.setSelection(inputField.text.length)
+                }
             }
             slashPopup = this
         }
+        popup.setContentWidth(inputField.width.coerceAtLeast(dp(220)))
         popup.setAdapter(ArrayAdapter(context, android.R.layout.simple_list_item_1, labels))
         popup.show()
     }
@@ -1048,9 +1082,86 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         slashPopup?.dismiss()
     }
 
+    // ---------------------------------------------------- @file mention picker
+
+    private fun updateMentionSuggestions(text: String) {
+        val token = mentionTokenAt(text) ?: run {
+            mentionPopup?.dismiss()
+            return
+        }
+        ensureMentionFiles {
+            val matches = ProjectFiles.filter(mentionFiles, token.removePrefix("@"))
+            if (matches.isEmpty()) {
+                mentionPopup?.dismiss()
+                return@ensureMentionFiles
+            }
+            activeMentionToken = token
+            val labels = matches.map { "@$it" }
+            val popup = mentionPopup ?: ListPopupWindow(context).apply {
+                anchorView = inputField
+                isModal = false
+                setOnItemClickListener { _, _, position, _ ->
+                    mentionPopup?.dismiss()
+                    val relative = matches.getOrNull(position) ?: return@setOnItemClickListener
+                    val current = activeMentionToken ?: return@setOnItemClickListener
+                    val editable = inputField.text ?: return@setOnItemClickListener
+                    val start = (editable.length - current.length).coerceAtLeast(0)
+                    editable.replace(start, editable.length, "@$relative ")
+                    inputField.setSelection(editable.length)
+                    activeMentionToken = null
+                }
+                mentionPopup = this
+            }
+            popup.setContentWidth(inputField.width.coerceAtLeast(dp(220)))
+            popup.setAdapter(ArrayAdapter(context, android.R.layout.simple_list_item_1, labels))
+            popup.show()
+        }
+    }
+
+    /** The "@..." token currently being typed, or null. */
+    private fun mentionTokenAt(text: String): String? {
+        if (text.isEmpty()) return null
+        val start = text.lastIndexOf('@')
+        if (start < 0) return null
+        if (start > 0) {
+            val prev = text[start - 1]
+            if (prev.isLetterOrDigit() || prev == '_' || prev == '.' || prev == '/') return null
+        }
+        val token = text.substring(start)
+        return if (token.contains(' ') || token.contains('\n')) null else token
+    }
+
+    private fun ensureMentionFiles(onReady: () -> Unit) {
+        val root = engine.workspaceRoot()
+        if (mentionFilesRoot == root && mentionFiles.isNotEmpty()) {
+            onReady()
+            return
+        }
+        if (mentionFilesLoading) return
+        mentionFilesLoading = true
+        Thread {
+            val files = runCatching { ProjectFiles.list(root) }.getOrDefault(emptyList())
+            post {
+                mentionFiles = files
+                mentionFilesRoot = root
+                mentionFilesLoading = false
+                onReady()
+            }
+        }.start()
+    }
+
+    private fun updateContextBadge(text: String) {
+        val badge = PromptContextBadge.format(engine.currentFileContextPath(), text)
+        contextBadge.text = badge
+        contextBadge.visibility = if (badge.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    // ------------------------------------------------------- slash dispatch
+
     private fun sendMessage() {
         val text = inputField.text.toString().trim()
         if (text.isEmpty() && pendingImageBase64 == null) return
+        if (text.startsWith("/") && handleSlashInput(text)) return
         inputField.setText("")
         val imageB64 = pendingImageBase64
         pendingImageBase64 = null
@@ -1062,6 +1173,166 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         commandOutputText.text = ""
         commandOutputScroll.visibility = View.GONE
         engine.sendMessage(text, imageBase64 = imageB64)
+    }
+
+    /**
+     * Runs a local slash command. Returns true when consumed; false lets the
+     * text flow to the engine (unknown-but-template commands like /init).
+     */
+    private fun handleSlashInput(text: String): Boolean {
+        return when (val invocation = slashRegistry.parse(text)) {
+            is SlashInvocation.Known -> {
+                inputField.setText("")
+                runSlashCommand(invocation.command)
+                true
+            }
+            is SlashInvocation.Unknown -> {
+                val knownTemplate = runCatching {
+                    engine.listCommands().any { it.name.equals(invocation.name, ignoreCase = true) }
+                }.getOrDefault(false)
+                if (knownTemplate) false else {
+                    inputField.setText("")
+                    addMessage("system", "Unknown command: /${invocation.name} — type / to see commands.")
+                    true
+                }
+            }
+            SlashInvocation.NotACommand -> false
+        }
+    }
+
+    private fun runSlashCommand(command: SlashCommand) {
+        when (command.action) {
+            SlashCommandAction.HELP -> addMessage("system", SlashCommandRegistry.helpText())
+            SlashCommandAction.CLEAR -> confirmClearConversation()
+            SlashCommandAction.NEW_SESSION -> startNewConversation()
+            SlashCommandAction.SHOW_SESSIONS -> showHistoryDialog()
+            SlashCommandAction.SHOW_MODELS -> showSettingsDialog()
+            SlashCommandAction.TOGGLE_PLAN -> togglePlanMode()
+            SlashCommandAction.UNDO -> confirmUndo()
+            SlashCommandAction.REDO -> performRedo()
+            SlashCommandAction.SHOW_CHANGES -> listChangedFilesNotice()
+            SlashCommandAction.STATUS -> addMessage(
+                "system",
+                StatusLine.format(
+                    project = engine.workspaceRoot().absolutePath,
+                    openFile = engine.currentFileContextPath(),
+                    model = engine.currentModelLabel(),
+                    sessionId = engine.currentSessionId(),
+                    agent = engine.agentName,
+                ),
+            )
+        }
+    }
+
+    private fun startNewConversation() {
+        engine.newSession()
+        outputContainer.removeAllViews()
+        commandOutputContainer.removeAllViews()
+        commandOutputScroll.visibility = View.GONE
+        planToggle.visibility = View.GONE
+        planContainer.visibility = View.GONE
+        thinkingText.text = "AI Agent Ready"
+        thinkingCard.visibility = View.GONE
+        thinkingLiveBuf.setLength(0)
+        thinkingLiveDone = true
+        updateTokenCount()
+        addMessage("system", "Started a new conversation.")
+    }
+
+    private fun confirmClearConversation() {
+        android.app.AlertDialog.Builder(context)
+            .setTitle("Clear conversation?")
+            .setMessage("This clears the visible conversation and starts a new session. The previous session stays in History.")
+            .setPositiveButton("Clear") { _, _ -> startNewConversation() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun togglePlanMode() {
+        val targetPosition = if (engine.agentName == "plan") 0 else 1 // 0 build, 1 plan
+        if (modeSelector.selectedItemPosition == targetPosition) {
+            engine.setAgentMode(if (targetPosition == 1) "plan" else "build")
+            addMessage(
+                "system",
+                if (targetPosition == 1) "Agent mode: Plan (Read-Only)" else "Agent mode: Build (Full Access)",
+            )
+        } else {
+            // The spinner's listener applies the mode and reports it.
+            modeSelector.setSelection(targetPosition)
+        }
+    }
+
+    private fun confirmUndo() {
+        Thread {
+            val deltas = runCatching { engine.pendingUndoDeltas() }.getOrDefault(emptyList())
+            post {
+                if (deltas.isEmpty()) {
+                    addMessage("system", "Nothing to undo.")
+                    return@post
+                }
+                val listing = deltas.joinToString("\n") { d ->
+                    val sign = if (d.lineDelta >= 0) "+" else ""
+                    "${File(d.path).name}  ($sign${d.lineDelta} lines)" + if (d.existedBefore) "" else " (created)"
+                }
+                android.app.AlertDialog.Builder(context)
+                    .setTitle("Undo the agent's last change?")
+                    .setMessage(listing)
+                    .setPositiveButton("Undo") { _, _ ->
+                        Thread {
+                            val outcome = runCatching { engine.undoLastTurn() }
+                                .getOrElse { CheckpointOutcome.Failed(it.message ?: "undo failed", emptyList()) }
+                            post { reportUndoRedo(outcome, redo = false) }
+                        }.start()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    private fun performRedo() {
+        Thread {
+            val outcome = runCatching { engine.redoLastTurn() }
+                .getOrElse { CheckpointOutcome.Failed(it.message ?: "redo failed", emptyList()) }
+            post { reportUndoRedo(outcome, redo = true) }
+        }.start()
+    }
+
+    private fun reportUndoRedo(outcome: CheckpointOutcome, redo: Boolean) {
+        val message = when (outcome) {
+            is CheckpointOutcome.Undone -> "Undid ${outcome.files.size} file(s)."
+            is CheckpointOutcome.Redone -> "Re-applied ${outcome.files.size} file(s)."
+            CheckpointOutcome.NothingToUndo -> if (redo) "Nothing to redo." else "Nothing to undo."
+            CheckpointOutcome.NothingToRedo -> if (redo) "Nothing to redo." else "Nothing to undo."
+            is CheckpointOutcome.Failed -> "⚠ ${if (redo) "Redo" else "Undo"} failed: ${outcome.message}"
+        }
+        addMessage("system", message)
+    }
+
+    /** /files for the panel (no CHANGES tab): list what this session changed. */
+    private fun listChangedFilesNotice() {
+        val sessionId = engine.currentSessionId()
+        val files = if (sessionId == null) emptyList() else engine.sessionMessages(sessionId)
+            .flatMap { msg ->
+                val parts = OcMessage.parts(msg)
+                (0 until parts.length()).mapNotNull { i ->
+                    val part = parts.optJSONObject(i) ?: return@mapNotNull null
+                    if (part.optString("type") != "tool") return@mapNotNull null
+                    if (part.optString("tool") !in setOf("write", "edit", "patch")) return@mapNotNull null
+                    val toolInput = part.optJSONObject("state")?.optJSONObject("input")
+                    val path = toolInput?.optString("filePath", "")?.ifEmpty { toolInput.optString("path", "") }
+                    path?.takeIf { it.isNotEmpty() }
+                }
+            }
+            .distinct()
+        addMessage(
+            "system",
+            if (files.isEmpty()) {
+                "No files changed in this session yet. (Full diff view: AI Workspace → Changes.)"
+            } else {
+                "Files changed in this session:\n" + files.joinToString("\n") { "• $it" }
+            },
+        )
     }
 
     private fun pickImage() {
@@ -1342,6 +1613,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         }
 
         // User: rounded bubble (label inside), capped at 85% width, right-aligned.
+        // The bubble lives in a MATCH_PARENT horizontal row with gravity END and
+        // is itself WRAP_CONTENT so short messages stay narrow. (Giving the
+        // bubble weight directly would measure it 0 px wide: this root is
+        // VERTICAL, so weight distributes height, not width.)
         val host: LinearLayout
         if (isUser) {
             val bubble = LinearLayout(context).apply {
@@ -1349,8 +1624,14 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 background = StudioUi.rounded(context, fill = "#24405F", radiusDp = 14)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             }
-            root.addView(bubble, LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.85f))
+            val row = LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                gravity = Gravity.END
+            }
+            row.addView(bubble, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+            root.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
             host = bubble
+            capUserBubbleWidthOnceLaidOut(row, bubble)
         } else {
             host = root
         }

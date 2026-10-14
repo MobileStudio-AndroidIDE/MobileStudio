@@ -228,7 +228,7 @@ class NativeToolShimWrappersTest {
             File(toolchain, "vanished/cmake").toPath()
         )
 
-        val lines = NativeToolWrappers.ensureSdkWrappers(sdk, toolchain, linkerOnlyTester)
+        val lines = NativeToolWrappers.ensureSdkWrappers(sdk, toolchain, tester = linkerOnlyTester)
         val report = lines.joinToString("\n")
         assertTrue("real cmake logged:\n$report", report.contains("real cmake: ${realCmake.absolutePath}"))
         assertTrue("exec mode logged (linker64-only):\n$report", report.contains("(exec: linker64)"))
@@ -247,7 +247,7 @@ class NativeToolShimWrappersTest {
         assertFalse(sdkNinja.readText().contains("CMAKE_ROOT"))
 
         // Second run: idempotent, reports "wrapper ok".
-        val second = NativeToolWrappers.ensureSdkWrappers(sdk, toolchain, linkerOnlyTester)
+        val second = NativeToolWrappers.ensureSdkWrappers(sdk, toolchain, tester = linkerOnlyTester)
         assertTrue(second.any { it.startsWith("> [CMake] wrapper ok:") && "bin/cmake" in it })
         assertFalse(second.any { it.startsWith("> [CMake] wrapper written:") })
     }
@@ -258,7 +258,7 @@ class NativeToolShimWrappersTest {
         val sdk = tempDir("tw-bare-sdk")
         File(sdk, "cmake/3.22.1/bin").mkdirs()
 
-        val lines = NativeToolWrappers.ensureSdkWrappers(sdk, File(files, "toolchain"), linkerOnlyTester)
+        val lines = NativeToolWrappers.ensureSdkWrappers(sdk, File(files, "toolchain"), tester = linkerOnlyTester)
         val report = lines.joinToString("\n")
         assertTrue("warn about missing cmake:\n$report", report.contains("WARN: no executable arm64 cmake"))
         assertTrue("warn about missing ninja:\n$report", report.contains("WARN: no executable arm64 ninja"))
@@ -272,7 +272,7 @@ class NativeToolShimWrappersTest {
         val lines = NativeToolWrappers.ensureSdkWrappers(
             tempDir("tw-nosdk"),
             tempDir("tw-notools"),
-            linkerOnlyTester
+            tester = linkerOnlyTester
         )
         assertEquals(1, lines.size)
         assertTrue(lines[0].contains("no SDK cmake folder"))

@@ -15,6 +15,18 @@ object AppLanguage {
         val literals: Map<String, String> = emptyMap()
     )
 
+    /**
+     * Literal packs shipped as JSON under assets/i18n/<code>.json so translations
+     * can be maintained (and machine-translated) outside the Kotlin source. The
+     * first five languages keep their hand-tuned maps in this file; everything
+     * below loads from assets.
+     */
+    private val jsonPackCodes = listOf(
+        "de", "fr", "it", "pt", "ru", "ar", "hi", "id", "th", "vi",
+        "tr", "nl", "pl", "sv", "uk", "fa", "he", "ms", "bn", "tl",
+        "cs", "el", "ro", "hu", "da", "fi", "nb", "sk", "hr", "bg"
+    )
+
     private val packs: MutableMap<String, LanguagePack> by lazy {
         linkedMapOf(
             "ko" to LanguagePack(
@@ -47,7 +59,44 @@ object AppLanguage {
                 language = Language("es", "Espanol"),
                 literals = spanishLiterals
             )
-        )
+        ).apply {
+            jsonPackCodes.forEach { code -> loadJsonPack(code)?.let { put(code, it) } }
+        }
+    }
+
+    /** Reads assets/i18n/<code>.json. A missing/corrupt pack is skipped, never fatal. */
+    private var assetContext: Context? = null
+
+    @Synchronized
+    private fun loadJsonPack(code: String): LanguagePack? {
+        val ctx = assetContext ?: return null
+        return try {
+            val json = ctx.assets.open("i18n/$code.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val o = JSONObject(json)
+            val lang = o.optJSONObject("language")
+            val nativeName = lang?.optString("nativeName").orEmpty().ifBlank { code }
+            val litObj = o.optJSONObject("literals") ?: return null
+            val literals = HashMap<String, String>()
+            val it = litObj.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                val v = litObj.optString(k, "")
+                if (v.isNotBlank()) literals[k] = v
+            }
+            if (literals.isEmpty()) return null
+            LanguagePack(Language(code, nativeName), literals = literals)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Assets are needed for the JSON packs; call once from Application/activity. */
+    fun bindAssets(context: Context) {
+        assetContext = context.applicationContext
+        // Re-materialise packs now that assets are reachable (no-op if already loaded).
+        jsonPackCodes.forEach { code ->
+            if (!packs.containsKey(code)) loadJsonPack(code)?.let { packs[code] = it }
+        }
     }
 
     private var translationApiKey: String = ""
@@ -58,36 +107,87 @@ object AppLanguage {
         translationApiUrl = apiUrl
     }
 
+    /**
+     * Translates on the fly.
+     *
+     * Engines, in order:
+     *  1. a user-configured API (Naver Papago by default) — needs a key;
+     *  2. MyMemory — free, keyless, rate-limited; the default so every one of
+     *     the 30+ UI languages and any extension can be translated without
+     *     the user setting anything up.
+     * Returns [text] unchanged when every engine fails, so a missing key or a
+     * network hiccup degrades to English/original instead of breaking the UI.
+     */
     fun translateViaApi(text: String, targetLang: String): String {
-        if (translationApiKey.isBlank()) return text
+        if (text.isBlank()) return text
+        configuredTranslate(text, targetLang)?.let { return it }
+        return myMemoryTranslate(text, targetLang) ?: text
+    }
+
+    /** Naver Papago (or whatever endpoint the user configured). Null when unusable. */
+    private fun configuredTranslate(text: String, targetLang: String): String? {
+        if (translationApiKey.isBlank()) return null
         return try {
-            val url = URL(translationApiUrl)
+            val url = URL(translationApiUrl.ifBlank { "https://openapi.naver.com/v1/papago/n2mt" })
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.doOutput = true
+            conn.connectTimeout = 8_000
+            conn.readTimeout = 15_000
             conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             conn.setRequestProperty("X-Naver-Client-Id", translationApiKey.substringBefore(":"))
             conn.setRequestProperty("X-Naver-Client-Secret", translationApiKey.substringAfter(":"))
-            val source = when (targetLang) { "ja" -> "ko"; "zh" -> "ko"; "es" -> "ko"; else -> "auto" }
-            val params = "source=$source&target=$targetLang&text=${URLEncoder.encode(text, "UTF-8")}"
-            conn.outputStream.write(params.toByteArray())
+            val source = when (targetLang) { "ja", "zh", "es" -> "ko"; else -> "auto" }
+            val params = "source=$source&target=${naverTarget(targetLang)}&text=${URLEncoder.encode(text, "UTF-8")}"
+            conn.outputStream.use { it.write(params.toByteArray()) }
             val response = conn.inputStream.bufferedReader().readText()
             JSONObject(response).getJSONObject("message").getJSONObject("result").getString("translatedText")
         } catch (e: Exception) {
-            text
+            null
         }
+    }
+
+    private fun naverTarget(code: String) = when (code) {
+        "zh" -> "zh-CN"; "pt" -> "pt"; else -> code
+    }
+
+    /** MyMemory: free and keyless. Null on any failure so callers can fall back. */
+    private fun myMemoryTranslate(text: String, targetLang: String): String? {
+        // Literals are keyed by English source, so English is the safe source.
+        val source = "en"
+        val target = when (targetLang) { "zh" -> "zh"; "tl" -> "tl"; else -> targetLang }
+        return try {
+            val url = URL(
+                "https://api.mymemory.translated.net/get?q=" + URLEncoder.encode(text, "UTF-8") +
+                    "&langpair=$source|$target"
+            )
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 8_000
+            conn.readTimeout = 15_000
+            val response = conn.inputStream.bufferedReader().readText()
+            val translated = JSONObject(response)
+                .optJSONObject("responseData")?.optString("translatedText").orEmpty()
+            // MyMemory echoes the query back when it has no translation.
+            if (translated.isBlank() || translated.equals(text, ignoreCase = true)) null else translated
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** App language code → translation-engine target code. */
+    private fun engineTarget(code: String): String? = when (code) {
+        "en", "ko" -> null // source languages, never translated
+        else -> code
     }
 
     // For non-Korean source, translate via API
     fun translateText(context: Context, text: String): String {
         val code = current(context).code
-        if (code == "en" || code == "ko") return text
+        val target = engineTarget(code) ?: return text
         val pack = packs[code] ?: return text
         val cached = pack.literals[text]
         if (cached != null) return cached
-        // Try API translation
-        val apiResult = translateViaApi(text, when(code) { "ja" -> "ja"; "zh" -> "zh-CN"; "es" -> "es"; else -> return text })
-        return apiResult
+        return translateViaApi(text, target)
     }
 
     val supported: List<Language>
@@ -121,16 +221,16 @@ object AppLanguage {
 
     fun literal(context: Context, value: String): String {
         val code = current(context).code
-        if (code == "en") return value
         val pack = packs[code] ?: return value
+        // English is the source of the literal table — nothing to translate.
+        if (code == "en") return value
         val cached = pack.literals[value]
         if (cached != null) return cached
-        // Try API translation for non-Korean languages
-        if (code != "ko") {
-            val apiResult = translateViaApi(value, when(code) { "ja" -> "ja"; "zh" -> "zh-CN"; "es" -> "es"; else -> return value })
-            if (apiResult != value && apiResult.isNotBlank()) return apiResult
-        }
-        return translateKoreanDynamic(value)
+        // Not in the shipped pack: translate on the fly (keyless engine by default).
+        val target = engineTarget(code) ?: return value
+        val apiResult = translateViaApi(value, target)
+        if (apiResult != value && apiResult.isNotBlank()) return apiResult
+        return if (code == "ko") translateKoreanDynamic(value) else value
     }
 
     fun translateBuildLog(context: Context, line: String): String {
@@ -348,7 +448,7 @@ object AppLanguage {
         "View" to "보기",
         "Navigate" to "이동",
         "Code" to "코드",
-        "Refactor" to "Refactor",
+        "Refactor" to "리팩토링",
         "Build" to "빌드",
         "Run" to "실행",
         "Tools" to "도구",
@@ -381,6 +481,8 @@ object AppLanguage {
         "Project" to "프로젝트",
         "Open Project" to "프로젝트 열기",
         "New Project" to "새 프로젝트 만들기",
+        "Recent Projects" to "최근 프로젝트",
+        "Recent Files" to "최근 파일",
         "File Explorer" to "파일 탐색기",
         "Project Explorer" to "프로젝트 탐색기",
         "Open Build Tools" to "빌드 도구 열기",
@@ -478,6 +580,7 @@ object AppLanguage {
         "Hide" to "隠す", "Build Tools" to "ビルドツール", "Shell" to "シェル", "Problems" to "問題",
         "Search" to "検索", "Compile" to "コンパイル", "Outputs" to "出力", "Logcat" to "Logcat",
         "PIP" to "PIP", "Project" to "プロジェクト", "Open Project" to "プロジェクトを開く",
+        "Recent Projects" to "最近のプロジェクト", "Recent Files" to "最近のファイル",
         "New Project" to "新規プロジェクト", "File Explorer" to "ファイルエクスプローラー",
         "Project Explorer" to "プロジェクトエクスプローラー", "Open Build Tools" to "ビルドツールを開く",
         "Extensions" to "拡張機能", "MobileStudio Community" to "MobileStudioコミュニティ",
@@ -530,6 +633,7 @@ object AppLanguage {
         "Clear" to "清除", "Hide" to "隐藏", "Build Tools" to "构建工具", "Shell" to "Shell",
         "Problems" to "问题", "Search" to "搜索", "Compile" to "编译", "Outputs" to "输出",
         "Logcat" to "Logcat", "PIP" to "PIP", "Project" to "项目", "Open Project" to "打开项目",
+        "Recent Projects" to "最近的项目", "Recent Files" to "最近的文件",
         "New Project" to "新建项目", "File Explorer" to "文件浏览器",
         "Project Explorer" to "项目浏览器", "Open Build Tools" to "打开构建工具",
         "Extensions" to "扩展", "MobileStudio Community" to "MobileStudio社区",
@@ -580,6 +684,7 @@ object AppLanguage {
         "Problems" to "Problemas", "Search" to "Buscar", "Compile" to "Compilar",
         "Outputs" to "Salidas", "Logcat" to "Logcat", "PIP" to "PIP", "Project" to "Proyecto",
         "Open Project" to "Abrir proyecto", "New Project" to "Nuevo proyecto",
+        "Recent Projects" to "Proyectos recientes", "Recent Files" to "Archivos recientes",
         "File Explorer" to "Explorador de archivos", "Project Explorer" to "Explorador de proyecto",
         "Open Build Tools" to "Abrir herramientas de compilacion", "Extensions" to "Extensiones",
         "MobileStudio Community" to "Comunidad MobileStudio",

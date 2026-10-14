@@ -2,14 +2,24 @@ package com.aide.mobilestudio.ai
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.aide.mobilestudio.SecurePrefs
 
 class AiSettings(private val context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    // API keys live in an encrypted store; existing plaintext values are migrated once.
+    private val prefs: SharedPreferences = SecurePrefs.get(context, SECURE_PREFS).also {
+        SecurePrefs.migrateAll(context, PREFS, it)
+    }
 
     companion object {
         const val PREFS = "ai_settings"
+        const val SECURE_PREFS = "ai_settings_secure"
         const val KEY_OC_PERMISSIONS = "oc_saved_permissions"
     }
+
+    /** Raw JSON of saved opencode permission rules (read by OcEngine). */
+    fun ocPermissionsJson(): String = prefs.getString(KEY_OC_PERMISSIONS, "[]") ?: "[]"
+
+    fun setOcPermissionsJson(json: String) = prefs.edit().putString(KEY_OC_PERMISSIONS, json).apply()
 
     var apiKey: String?
         get() = prefs.getString("gemini_api_key", null)

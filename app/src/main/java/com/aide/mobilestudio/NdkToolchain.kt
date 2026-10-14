@@ -40,25 +40,27 @@ object NdkToolchain {
     /**
      * Official Google NDK revisions (full build numbers) rebuilt with a
      * self-built ARM64/Bionic LLVM-24. Assets are `android-ndk-<ver>-arm64.tar.zst`.
+     * NEWEST FIRST — this is the bundled FALLBACK list; the dynamic catalog
+     * (BuildToolCatalog) is authoritative when the network is reachable.
      */
     val GITHUB_NDK_VERSIONS = listOf(
-        "27.0.11718014",
-        "27.0.11902837",
-        "27.0.12077973",
-        "27.1.12297006",
-        "27.2.12479018",
-        "27.3.13750724",
-        "28.0.12433566",
-        "28.0.12674087",
-        "28.0.12916984",
-        "28.0.13004108",
-        "28.1.13356709",
-        "28.2.13676358",
-        "29.0.13113456",
-        "29.0.13599879",
-        "29.0.13846066",
+        "29.0.14206865",
         "29.0.14033849",
-        "29.0.14206865"
+        "29.0.13846066",
+        "29.0.13599879",
+        "29.0.13113456",
+        "28.2.13676358",
+        "28.1.13356709",
+        "28.0.13004108",
+        "28.0.12916984",
+        "28.0.12674087",
+        "28.0.12433566",
+        "27.3.13750724",
+        "27.2.12479018",
+        "27.1.12297006",
+        "27.0.12077973",
+        "27.0.11902837",
+        "27.0.11718014"
     )
 
     /** Default aarch64 API level used when a project has no minSdk hint. */
@@ -77,6 +79,30 @@ object NdkToolchain {
             File(dir, "toolchains/llvm/bin/clang").isFile ||
             (File(dir, "toolchains/llvm/sysroot/usr/lib/aarch64-linux-android").isDirectory &&
                 File(dir, "toolchains/llvm/bin/lld").exists())
+
+    /**
+     * Any arm64-hosted NDK already on disk, regardless of which revision the
+     * caller would have asked for. Used to avoid downloading a second copy just
+     * because a newer version was requested.
+     */
+    fun findInstalledArm64Ndk(context: Context): File? =
+        BuildToolchain.ndkDirs(context).firstOrNull { isArm64NdkDir(it) }
+
+    /** Revision of an installed NDK dir: source.properties first, then the dir name. */
+    fun versionOf(ndkDir: File): String? {
+        runCatching {
+            val props = File(ndkDir, "source.properties")
+            if (props.isFile) {
+                props.readLines()
+                    .firstOrNull { it.trim().startsWith("Pkg.Revision") }
+                    ?.substringAfter('=')
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { return it }
+            }
+        }
+        return Regex("android-ndk-(.+)-arm64").find(ndkDir.name)?.groupValues?.get(1)
+    }
 
     /** <ndk>/toolchains/llvm/bin — arm64 LLVM layout (NOT prebuilt/linux-x86_64). */
     fun llvmBinDir(ndkDir: File): File = File(ndkDir, "toolchains/llvm/bin")
@@ -250,20 +276,34 @@ object NdkToolchain {
     /**
      * Downloads + extracts an arm64 NDK from the GitHub Release into
      * toolchain/ndk/android-<version>-arm64. Returns the NDK root dir.
+     * Any official Google NDK revision is accepted — the download URL is
+     * resolved from the dynamic catalog (BuildToolCatalog) with the
+     * NDK-arm64 release form as fallback, so newly published revisions work
+     * without shipping an updated hardcoded list.
      */
     fun installFromGithub(
         context: Context,
         version: String,
         onLine: (String) -> Unit = {}
     ): File {
-        require(version in GITHUB_NDK_VERSIONS) { "Unknown NDK version: $version" }
+        val url = runCatching {
+            BuildToolCatalog.findNdk(BuildToolCatalog.fetch(context), version)?.url
+        }.getOrNull() ?: githubUrl(version)
         val target = installDir(context, version)
         if (isArm64NdkDir(target)) {
             onLine("NDK $version already installed: $target")
             return target
         }
+        // A different revision may already be installed. Downloading a second
+        // ~1GB NDK just because the caller asked for a newer one wastes the
+        // user's data and time, so reuse what is on disk and report it.
+        val alreadyInstalled = findInstalledArm64Ndk(context)
+        if (alreadyInstalled != null) {
+            onLine("NDK ${versionOf(alreadyInstalled) ?: alreadyInstalled.name} already installed; reusing it instead of downloading $version")
+            return alreadyInstalled
+        }
         val tmp = File(context.cacheDir, "ndk-github-$version.tar.zst")
-        GlibcDownloader.downloadFile(githubUrl(version), tmp) { msg -> onLine(msg) }
+        GlibcDownloader.downloadFile(url, tmp) { msg -> onLine(msg) }
         onLine("Extracting ${githubAssetName(version)} ...")
         target.parentFile?.mkdirs()
         runCatching { target.deleteRecursively() }

@@ -5,6 +5,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class ToolchainUpdateSites(private val context: Context) {
+
+    companion object {
+        /** How long a scraped version cache is trusted before auto-refresh. */
+        const val DEFAULT_REFRESH_TTL_MS: Long = 60L * 60L * 1000L
+    }
+
     data class PackageInfo(
         val kind: ToolchainManager.Kind,
         val version: String,
@@ -51,9 +57,28 @@ class ToolchainUpdateSites(private val context: Context) {
         packages.forEach { info ->
             if (info.url != null) editor.putString(urlKey(kind, info.version), info.url)
         }
+        editor.putLong(lastRefreshKey(kind), System.currentTimeMillis())
         editor.apply()
         return packages
     }
+
+    /**
+     * Refreshes only when the cached scrape is older than [ttlMs] (per kind).
+     * Returns null when the cache is fresh enough — used by UI entry points
+     * so the newest versions appear automatically without hammering the
+     * update site on every screen. The manual "Fetch" button uses [refresh]
+     * (always forces).
+     */
+    fun refreshIfStale(
+        kind: ToolchainManager.Kind,
+        ttlMs: Long = DEFAULT_REFRESH_TTL_MS
+    ): List<PackageInfo>? {
+        val last = prefs.getLong(lastRefreshKey(kind), 0L)
+        if (System.currentTimeMillis() - last < ttlMs) return null
+        return runCatching { refresh(kind) }.getOrNull()
+    }
+
+    private fun lastRefreshKey(kind: ToolchainManager.Kind) = "last_refresh_${kind.name}"
 
     private fun defaultSites(kind: ToolchainManager.Kind): List<String> = when (kind) {
         ToolchainManager.Kind.JDK -> listOf(

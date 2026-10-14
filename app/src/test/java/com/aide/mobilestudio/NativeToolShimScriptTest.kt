@@ -143,6 +143,37 @@ class NativeToolShimScriptTest {
     }
 
     @Test
+    fun ninjaRedirectedViaStudioShellToolsLayout() {
+        // The app's known-good arm64 ninja lives at <filesDir>/tools/ninja/bin/
+        // ninja (StudioShellTools). The shim must find it and prefer it over the
+        // SDK's LINUX x86-64 ninja that Android cannot exec.
+        setUpTree(withPorts = false)
+        val studioNinja = File(root, "tools/ninja/bin/ninja")
+        writeStub(studioNinja)
+        val (exit, out) = runShim(sdkNinjaPath, "-C", "build")
+
+        assertEquals(0, exit)
+        assertEquals(studioNinja.absolutePath, linesByPrefix(out, "BIN:").single())
+        assertEquals(listOf("-C", "build"), linesByPrefix(out, "ARG:"))
+    }
+
+    @Test
+    fun ninjaRedirectedViaCmakeRuntimeManagerLayout() {
+        // Regression: after an app reinstall the port lives at
+        // <toolchain>/cmake/<version>/bin/ninja (CmakeRuntimeManager), not under
+        // arm64-tools; the shim must still find it (otherwise the SDK's non-PIE
+        // ninja is exec'd and linker64 fails with "unexpected e_type: 2").
+        setUpTree(withPorts = false)
+        val runtimeNinja = File(root, "toolchain/cmake/3.22.1/bin/ninja")
+        writeStub(runtimeNinja)
+        val (exit, out) = runShim(sdkNinjaPath, "-C", "build")
+
+        assertEquals(0, exit)
+        assertEquals(runtimeNinja.absolutePath, linesByPrefix(out, "BIN:").single())
+        assertEquals(listOf("-C", "build"), linesByPrefix(out, "ARG:"))
+    }
+
+    @Test
     fun makeProgramArgRewrittenToFallbackNinja() {
         setUpTree(withPorts = true)
         val (exit, out) = runShim(sdkCmakePath, "-DCMAKE_MAKE_PROGRAM=$sdkNinjaPath", "-S", "proj")

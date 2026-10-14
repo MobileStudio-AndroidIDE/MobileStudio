@@ -36,6 +36,10 @@ object MobileStudioCrashGuard {
         if (installed) return
         installed = true
 
+        // Detect how the PREVIOUS process ended and surface a one-line notice
+        // when it ended abnormally. See [reportAbnormalPreviousRunIfNeeded].
+        reportAbnormalPreviousRunIfNeeded(application)
+
         // Auto-retry: if app crashed recently (< 60s), try to restart activity
         val crashCount = recentCrashCount(application)
         if (crashCount < MAX_RETRIES && crashCount > 0) {
@@ -52,6 +56,10 @@ object MobileStudioCrashGuard {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             writeCrash(application, "uncaught:${thread.name}", throwable)
+            // An uncaught exception means the process is about to die (or has
+            // already become unstable): invalidate the clean-exit marker so
+            // the next launch reports the abnormal termination.
+            runCatching { UiFreezeDetector.cleanExitMarkerFile(application).delete() }
             val activity = currentActivityRef
             if (activity != null && recentCrashCount(application) < MAX_RETRIES) {
                 Handler(Looper.getMainLooper()).post {
@@ -79,7 +87,72 @@ Handler(Looper.getMainLooper()).post {
     private var currentActivityRef: Activity? = null
 
     fun activityCreated(activity: Activity) { currentActivityRef = activity }
-    fun activityDestroyed(activity: Activity) { if (currentActivityRef === activity) currentActivityRef = null }
+
+    fun activityDestroyed(activity: Activity) {
+        if (currentActivityRef === activity) currentActivityRef = null
+        // Normal onDestroy is a clean exit: record it so the next launch does
+        // not report this process as "terminated unexpectedly".
+        markCleanExit(activity)
+    }
+
+    /**
+     * Writes the clean-exit marker ("this process ended / paused normally").
+     * Called on normal onDestroy and, via [UiFreezeDetector.stopMonitoring],
+     * on every background pause. The marker is cleared when the app returns
+     * to the foreground or crashes, so it is MISSING at the next launch
+     * exactly when the previous process died in the foreground.
+     */
+    fun markCleanExit(context: Context) {
+        runCatching {
+            val file = UiFreezeDetector.cleanExitMarkerFile(context)
+            file.parentFile?.mkdirs()
+            file.writeText(
+                RunMarkerLogic.encode(
+                    android.os.Process.myPid(),
+                    android.os.SystemClock.uptimeMillis(),
+                    System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    /**
+     * Detects how the PREVIOUS process ended and surfaces a one-line notice
+     * when it ended abnormally.
+     *
+     * Why no separate process: a kernel OOM kill (lmkd) terminates the process
+     * instantly — nothing inside the victim process can run or observe it. The
+     * only reliable way to catch that is a separate always-resident process
+     * (e.g. a `:watchdog` service with its own process) that monitors the main
+     * process from the outside. That cost (extra process, memory, IPC, its own
+     * lifecycle) is deliberately avoided here: the marker file covers the
+     * common cases — uncaught exceptions, ANR-then-kill, foreground OOM kill,
+     * and (via [UiFreezeDetector]'s heartbeat marker) kills while backgrounded
+     * — because those all leave a detectable fingerprint on disk: a missing or
+     * stale clean-exit marker next to a heartbeat marker from a dead pid.
+     */
+    private fun reportAbnormalPreviousRunIfNeeded(application: Application) {
+        runCatching {
+            val hadCleanExit = UiFreezeDetector.cleanExitMarkerFile(application).isFile
+            val heartbeat = UiFreezeDetector.heartbeatMarkerFile(application)
+                .takeIf { it.isFile }
+                ?.let { RunMarkerLogic.decode(it.readText()) }
+            // A device reboot killed everything — not an app fault, stay quiet.
+            val rebooted = heartbeat != null && RunMarkerLogic.evaluate(
+                heartbeat,
+                android.os.Process.myPid(),
+                android.os.SystemClock.uptimeMillis(),
+                hadCleanExit
+            ) == RunMarkerLogic.Verdict.REBOOTED
+            if (!hadCleanExit && !rebooted) {
+                val evidenceOfPreviousRun = heartbeat != null || crashCount(application) > 0
+                if (evidenceOfPreviousRun) {
+                    val latestLog = getCrashLogs(application).firstOrNull()?.name
+                    toast(application, RunMarkerLogic.abnormalExitNotice(AppLanguage.isKorean(application), latestLog))
+                }
+            }
+        }
+    }
 
     private fun recentCrashCount(context: Context): Int {
         val dir = File(context.filesDir, "logs/error")

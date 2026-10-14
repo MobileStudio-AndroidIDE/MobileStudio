@@ -112,6 +112,31 @@ object NativeToolWrappers {
             hdr[2] == 'L'.code.toByte() && hdr[3] == 'F'.code.toByte()
     }
 
+    /**
+     * True when [file] is a PIE (ET_DYN, e_type=3) ELF. Only PIE binaries can be
+     * launched through /system/bin/linker64; a non-PIE ET_EXEC (e_type=2) fails
+     * with "has unexpected e_type: 2".
+     */
+    fun isPieElf(file: File): Boolean {
+        if (!file.isFile || file.length() < 18) return false
+        val eType = runCatching {
+            file.inputStream().use { input ->
+                val hdr = ByteArray(18)
+                var read = 0
+                while (read < hdr.size) {
+                    val n = input.read(hdr, read, hdr.size - read)
+                    if (n <= 0) break
+                    read += n
+                }
+                if (read < 18) return false
+                if (!(hdr[0] == 0x7f.toByte() && hdr[1] == 'E'.code.toByte() &&
+                        hdr[2] == 'L'.code.toByte() && hdr[3] == 'F'.code.toByte())) return false
+                (hdr[16].toInt() and 0xff) or ((hdr[17].toInt() and 0xff) shl 8)
+            }
+        }.getOrDefault(-1)
+        return eType == 3
+    }
+
     private fun isSymbolicLink(file: File): Boolean =
         runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
 
@@ -169,6 +194,31 @@ object NativeToolWrappers {
         if (tester.run(listOf(file.absolutePath, "--version"))) return "direct"
         if (tester.run(listOf(linker64, file.absolutePath, "--version"))) return "linker64"
         return null
+    }
+
+    /**
+     * Resolves the best runnable port for [toolName], most-preferred first:
+     *   1. <filesDir>/tools/<tool>/bin/<tool>  (StudioShellTools, user-installed arm64)
+     *   2. the CMake runtime / arm64-tools tree under [toolchainRoot]
+     * Returns (file, "direct"|"linker64") or null. Explicit known-good locations
+     * are probed before the tree scan so a validated tool is never shadowed by
+     * a same-named binary elsewhere (e.g. the SDK's x86-64 Linux ninja).
+     */
+    fun resolvePortedTool(
+        filesDir: File,
+        toolchainRoot: File,
+        toolName: String,
+        tester: ExecTester = processExecTester,
+        linker64: String = DEFAULT_LINKER64
+    ): Pair<File, String>? {
+        val studioTool = File(filesDir, "tools/$toolName/bin/$toolName")
+        if (studioTool.isFile && isElf(studioTool)) {
+            // Known user-installed install: trust it even when the probe cannot
+            // run it in-process (the shim adds its lib/ to LD_LIBRARY_PATH and
+            // execs it through linker64 anyway).
+            return studioTool to (verifyTool(studioTool, tester, linker64) ?: "linker64")
+        }
+        return findExecutableTool(toolchainRoot, toolName, tester, linker64)
     }
 
     private fun shellQuote(value: String): String = value.replace("'", "'\\''")
@@ -253,6 +303,7 @@ object NativeToolWrappers {
     fun ensureSdkWrappers(
         sdkDir: File,
         toolchainRoot: File,
+        filesDir: File? = null,
         tester: ExecTester = processExecTester,
         linker64: String = DEFAULT_LINKER64
     ): List<String> {
@@ -262,8 +313,12 @@ object NativeToolWrappers {
             lines += "> [CMake] no SDK cmake folder at ${sdkCmakeRoot.absolutePath} — nothing to repair"
             return lines
         }
-        val realCmake = findExecutableTool(toolchainRoot, "cmake", tester, linker64)
-        val realNinja = findExecutableTool(toolchainRoot, "ninja", tester, linker64)
+        // Prefer the user-installed StudioShellTools tool when available, else
+        // scan the toolchain tree (CmakeRuntimeManager / Arm64ToolsDownloader).
+        val realCmake = filesDir?.let { resolvePortedTool(it, toolchainRoot, "cmake", tester, linker64) }
+            ?: findExecutableTool(toolchainRoot, "cmake", tester, linker64)
+        val realNinja = filesDir?.let { resolvePortedTool(it, toolchainRoot, "ninja", tester, linker64) }
+            ?: findExecutableTool(toolchainRoot, "ninja", tester, linker64)
         lines += realCmake?.let {
             "> [CMake] real cmake: ${it.first.absolutePath} (exec: ${it.second})"
         } ?: "> [CMake] WARN: no executable arm64 cmake found under ${toolchainRoot.absolutePath} " +

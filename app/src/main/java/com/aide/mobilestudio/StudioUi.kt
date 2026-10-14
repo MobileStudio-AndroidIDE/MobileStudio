@@ -81,32 +81,35 @@ object StudioUi {
         val m = HashMap<String, String>()
         fun put(hex: String, value: Int) { m[hex.lowercase()] = toHex(value) }
         put(Blue, p.accent)
-        if (!p.isDark) {
-            put(Ink, p.bg)
-            put(Card, p.card)
-            put(Surface, p.surface)
-            put(Surface2, p.surface2)
-            put(Surface3, p.muted)
-            put(Border, p.borderStrong)
-            put(Text, p.text)
-            put(TextSoft, p.textSoft)
-            put(Muted, p.muted)
-            put(Divider, p.divider)
-            put(DividerLight, p.divider)
-            put(LayerToolbar, p.surface)
-            put(LayerTabs, p.surface)
-            put(LayerEditor, p.editorBg)
-            put(LayerStatusBar, p.surface)
-            put(LayerBottomPanel, p.card)
-            put(LayerPanelTabs, p.surface)
-            put(ButtonNormal, p.surface2)
-            put(ButtonHover, p.surface)
-            put(ButtonBorder, p.borderStrong)
-            put(InputBg, p.card)
-            put(InputBorder, p.border)
-            put(CardBg, p.card)
-            put(CardBorder, p.border)
-        }
+        // Remap for EVERY palette, dark and light: every entry is derived from
+        // the palette's own fields, so switching between two dark themes
+        // (DRACULA <-> MONOKAI <-> NORD) now restyles the imperative UI too.
+        // For light palettes the entries below are exactly the mapping that
+        // existed before (same keys, same values, same order) — no regression.
+        put(Ink, p.bg)
+        put(Card, p.card)
+        put(Surface, p.surface)
+        put(Surface2, p.surface2)
+        put(Surface3, p.muted)
+        put(Border, p.borderStrong)
+        put(Text, p.text)
+        put(TextSoft, p.textSoft)
+        put(Muted, p.muted)
+        put(Divider, p.divider)
+        put(DividerLight, p.divider)
+        put(LayerToolbar, p.surface)
+        put(LayerTabs, p.surface)
+        put(LayerEditor, p.editorBg)
+        put(LayerStatusBar, p.surface)
+        put(LayerBottomPanel, p.card)
+        put(LayerPanelTabs, p.surface)
+        put(ButtonNormal, p.surface2)
+        put(ButtonHover, p.surface)
+        put(ButtonBorder, p.borderStrong)
+        put(InputBg, p.card)
+        put(InputBorder, p.border)
+        put(CardBg, p.card)
+        put(CardBorder, p.border)
         return m
     }
 

@@ -62,6 +62,9 @@ class ToolsActivity : AppCompatActivity() {
     private lateinit var updateSites: ToolchainUpdateSites
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    /** Per-kind count of "Show more old versions" taps (survives re-renders). */
+    private val expandedKindCounts = mutableMapOf<ToolchainManager.Kind, Int>()
+
     private fun t(value: String): String = AppLanguage.literal(this, value)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,7 +74,7 @@ class ToolsActivity : AppCompatActivity() {
         updateSites = ToolchainUpdateSites(this)
         setContentView(buildLayout())
         renderAll()
-
+        refreshRemoteCatalogs()
     }
 
     override fun onResume() {
@@ -899,8 +902,6 @@ class ToolsActivity : AppCompatActivity() {
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
 
-        val installed = toolchain.installedVersions(kind)
-        val available = toolchain.availableVersions(kind)
         val active = toolchain.activeVersion(kind)
 
         card.addView(LinearLayout(this).apply {
@@ -1027,7 +1028,7 @@ class ToolsActivity : AppCompatActivity() {
         }
 
         card.addView(spacer(dp(8)))
-        val versions = (installed + available).distinct().sorted()
+        val versions = toolVersionsNewestFirst(kind)
         if (versions.isEmpty()) {
             card.addView(TextView(this@ToolsActivity).apply {
                 text = t("No versions available")
@@ -1037,11 +1038,89 @@ class ToolsActivity : AppCompatActivity() {
                 setPadding(dp(16), dp(12), dp(16), dp(12))
             })
         } else {
-            versions.forEach { version ->
-                card.addView(buildVersionRow(kind, version, version == active))
+            // Paginated: newest PAGE_SIZE versions first, then a single
+            // "Show more old versions" row that reveals the next page
+            // (with a small staggered fade/slide animation) until exhausted.
+            val expansions = expandedKindCounts[kind] ?: 0
+            val rowsHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            card.addView(rowsHost)
+            VersionPagination.window(versions, expansions).forEach { version ->
+                rowsHost.addView(buildVersionRow(kind, version, version == active))
+            }
+            if (VersionPagination.hasMore(versions.size, expansions)) {
+                rowsHost.addView(buildShowMoreRow(kind, versions, expansions, rowsHost))
             }
         }
         return card
+    }
+
+    /** Installed + available versions merged, deduplicated, NEWEST first. */
+    private fun toolVersionsNewestFirst(kind: ToolchainManager.Kind): List<String> =
+        BuildToolCatalog.mergedVersionStringsNewestFirst(
+            toolchain.availableVersions(kind),
+            toolchain.installedVersions(kind)
+        )
+
+    /**
+     * The "Show more old versions" row. Tapping it appends the next page of
+     * rows in place (before this row), animating each new row in; the row
+     * removes itself once every version is visible.
+     */
+    private fun buildShowMoreRow(
+        kind: ToolchainManager.Kind,
+        versions: List<String>,
+        expansions: Int,
+        rowsHost: LinearLayout
+    ): View {
+        val remaining = versions.size - VersionPagination.visibleCount(versions.size, expansions)
+        return secondaryButton(t("Show more old versions") + " ($remaining)") {
+            val nextExpansions = expansions + 1
+            expandedKindCounts[kind] = nextExpansions
+            // Drop this button row (last child), append the new page, then
+            // re-append the button unless the list is exhausted.
+            if (rowsHost.childCount > 0) rowsHost.removeViewAt(rowsHost.childCount - 1)
+            val activeNow = toolchain.activeVersion(kind)
+            VersionPagination.nextBatchAfter(versions, expansions).forEachIndexed { index, version ->
+                val row = buildVersionRow(kind, version, version == activeNow)
+                rowsHost.addView(row)
+                animateRowIn(row, index)
+            }
+            if (VersionPagination.hasMore(versions.size, nextExpansions)) {
+                rowsHost.addView(buildShowMoreRow(kind, versions, nextExpansions, rowsHost))
+            }
+        }
+    }
+
+    /** Fade + slide entrance for newly revealed version rows (~180ms, staggered). */
+    private fun animateRowIn(row: View, index: Int) {
+        row.alpha = 0f
+        row.translationY = dp(8).toFloat()
+        row.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(180L)
+            .setStartDelay(index * 30L)
+            .withEndAction {
+                row.alpha = 1f
+                row.translationY = 0f
+            }
+            .start()
+    }
+
+    /**
+     * Pulls the dynamic build-tool catalog (GitHub releases) and the live
+     * Gradle distribution list in the background, then re-renders so newly
+     * published versions appear without hardcoding. Both are TTL-cached;
+     * failures are silent (bundled fallbacks keep the UI populated).
+     */
+    private fun refreshRemoteCatalogs() {
+        scope.launch(Dispatchers.IO) {
+            runCatching { BuildToolCatalog.fetch(this@ToolsActivity) }
+            runCatching { updateSites.refreshIfStale(ToolchainManager.Kind.GRADLE) }
+            withContext(Dispatchers.Main) {
+                if (::rootContainer.isInitialized) renderAll()
+            }
+        }
     }
 
     private fun buildPathRow(kind: ToolchainManager.Kind): View {
@@ -1532,6 +1611,17 @@ class ToolsActivity : AppCompatActivity() {
     }
 
     private fun installCmake(version: String) {
+        // Prefer the ARM64 port from the dynamic catalog (works without an
+        // SDK, SHA-256 verified when the catalog/bundled hash is known).
+        val catalogHasEntry = runCatching {
+            BuildToolCatalog.findCmake(BuildToolCatalog.loadCached(this), version) != null
+        }.getOrDefault(false)
+        if (catalogHasEntry || version == CmakeRuntimeManager.CMAKE_VERSION) {
+            installArm64Cmake(version)
+            return
+        }
+        // Fall back to the SDK manager flow for versions only published in
+        // the Google SDK repository (e.g. Google-only cmake builds).
         val sdkVersion = toolchain.activeVersion(ToolchainManager.Kind.SDK)
         if (sdkVersion == null) {
             toast("Install and activate an SDK first")
@@ -1556,6 +1646,65 @@ class ToolsActivity : AppCompatActivity() {
                 }
             } else {
                 renderAll()
+            }
+        }
+    }
+
+    /**
+     * Installs the user-ported arm64 CMake runtime for [version] via
+     * CmakeRuntimeManager (catalog URL, background thread, progress dialog).
+     */
+    private fun installArm64Cmake(version: String) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(t("Install CMake $version"))
+            .setMessage(t("Preparing..."))
+            .setCancelable(false)
+            .create()
+        dialog.show()
+        CmakeRuntimeManager.initAppContext(this)
+        scope.launch(Dispatchers.IO) {
+            // Refresh the catalog so a freshly published port is found even
+            // on the first use (TTL-cached afterwards).
+            runCatching { BuildToolCatalog.fetch(this@ToolsActivity) }
+            var error: String? = null
+            val latch = java.util.concurrent.CountDownLatch(1)
+            CmakeRuntimeManager.get(this@ToolsActivity).ensureInstalled(
+                onProgress = { read, total ->
+                    val percent = if (total > 0) (read * 100 / total).toInt() else 0
+                    val message = if (percent > 0) "$percent%" else "${read / (1024 * 1024)} MB"
+                    runOnUiThread { dialog.setMessage(t("Downloading... $message")) }
+                },
+                onLog = { },
+                onDone = { success, err ->
+                    error = err
+                    latch.countDown()
+                },
+                version = version
+            )
+            latch.await()
+            withContext(Dispatchers.Main) {
+                dialog.dismiss()
+                if (error == null && CmakeRuntimeManager.get(this@ToolsActivity).isInstalled(version)) {
+                    val currentCmake = toolchain.activeVersion(ToolchainManager.Kind.CMAKE)
+                    if (currentCmake != null && currentCmake != version) {
+                        VersionCompatibilityDialog(this@ToolsActivity).show(
+                            kind = ToolchainManager.Kind.CMAKE,
+                            currentVersion = currentCmake,
+                            newVersion = version,
+                            onConfirm = {
+                                toolchain.setActiveVersion(ToolchainManager.Kind.CMAKE, version)
+                                renderAll()
+                            }
+                        )
+                    } else {
+                        toolchain.setActiveVersion(ToolchainManager.Kind.CMAKE, version)
+                        renderAll()
+                    }
+                    toast("Installed: CMake $version")
+                } else {
+                    toast("CMake install failed: ${error?.take(120) ?: "unknown error"}")
+                    renderAll()
+                }
             }
         }
     }

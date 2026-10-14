@@ -25,6 +25,7 @@ object ExtensionServerClient {
     data class Result(val success: Boolean, val message: String, val url: String? = null)
 
     private const val PREFS = "extensions"
+    private const val SECURE_PREFS = "ext_session_secure"
     private const val KEY_SESSION = "server_session"
     private const val KEY_EXP = "server_session_exp"
     private const val KEY_LOGIN = "server_login"
@@ -245,5 +246,10 @@ object ExtensionServerClient {
         }.getOrNull()
     }
 
-    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private fun prefs(context: Context) =
+        com.aide.mobilestudio.SecurePrefs.get(context, SECURE_PREFS).also {
+            com.aide.mobilestudio.SecurePrefs.migrateKeys(
+                context, PREFS, it, setOf(KEY_SESSION, KEY_EXP, KEY_LOGIN)
+            )
+        }
 }

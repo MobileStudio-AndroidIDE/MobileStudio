@@ -20,27 +20,41 @@ object JdkDownloader {
     /** Bump this when the linker wrapper format changes to force regeneration */
     const val WRAPPER_FORMAT_VERSION = 13
 
-    // Supported JDK versions with their download URLs and SHA256 hashes
-    private val JDK_CONFIGS = mapOf(
-        21 to JdkConfig(
-            url = "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/jdk21-android-21.0.4/jdk21-android.tar.gz",
-            sha256 = "e561d04f4f91714da934723d1ec3214380b90e62e5aee3844ba2854179bd5c77",
-            minSize = 200_000_000L
-        ),
-        17 to JdkConfig(
-            url = "https://github.com/MobileStudio-AndroidIDE/MobileStudio_AndroidIDE/releases/download/MobileStudio-JDK17-Android-ARM64/jdk17-android.tar.gz",
-            sha256 = "b7cdb041d902f84efca00a886502b93e07c064d80c7386ba572dc9e99033e8e3",
-            minSize = 180_000_000L
-        )
+    // Minimum plausible archive sizes per JDK major (download sanity check).
+    private val MIN_SIZE_BY_MAJOR = mapOf(
+        21 to 200_000_000L,
+        17 to 180_000_000L
     )
+    private const val DEFAULT_MIN_SIZE = 150_000_000L
 
+    private const val JDK_VERSION = 21  // default version
+
+    /** URL + SHA-256 + size floor for a JDK major, resolved from the dynamic
+     *  catalog with the bundled legacy fallbacks (keeps existing installs
+     *  working when the network/catalog has nothing). */
     private data class JdkConfig(
         val url: String,
-        val sha256: String,
+        val sha256: String?,
         val minSize: Long
     )
 
-    private const val JDK_VERSION = 21  // default version
+    private fun resolveConfig(context: Context?, version: Int): JdkConfig? {
+        val catalog = context?.let { ctx ->
+            runCatching { BuildToolCatalog.fetch(ctx) }.getOrNull()
+        } ?: BuildToolCatalog.Catalog(emptyList(), emptyList(), emptyList(), 0L)
+        return configFromCatalog(catalog, version)
+    }
+
+    private fun configFromCatalog(catalog: BuildToolCatalog.Catalog, version: Int): JdkConfig? {
+        val entry = BuildToolCatalog.findJdk(catalog, version)
+        val fallback = BuildToolCatalog.FALLBACK_JDK.firstOrNull { it.version == version.toString() }
+        val url = entry?.url ?: fallback?.url ?: return null
+        // Trust a catalog hash; otherwise only reuse the bundled hash when the
+        // URL is exactly the legacy asset it was computed for.
+        val sha256 = entry?.sha256
+            ?: fallback?.takeIf { it.url == url }?.sha256
+        return JdkConfig(url, sha256, MIN_SIZE_BY_MAJOR[version] ?: DEFAULT_MIN_SIZE)
+    }
 
     data class JdkResult(
         val dir: File?,
@@ -58,7 +72,7 @@ object JdkDownloader {
         version: Int = JDK_VERSION,
         onProgress: ((String) -> Unit)? = null
     ): JdkResult {
-        val config = JDK_CONFIGS[version]
+        val config = resolveConfig(context, version)
             ?: return JdkResult(null, false, "Unsupported JDK version: $version")
 
         // Check if already valid (has lib/server/libjvm.so)
@@ -89,14 +103,22 @@ object JdkDownloader {
                 return JdkResult(null, false, msg)
             }
 
-            // Verify SHA256
-            val sha256 = computeSha256(tmpFile)
-            if (sha256 != config.sha256) {
-                tmpFile.delete()
-                val msg = "SHA256 mismatch: expected ${config.sha256}, got $sha256"
+            // Verify SHA256 (when a hash is known for this build; the dynamic
+            // catalog can carry JDK builds whose checksums are not published)
+            val expectedSha256 = config.sha256
+            if (expectedSha256 != null) {
+                val sha256 = computeSha256(tmpFile)
+                if (sha256 != expectedSha256) {
+                    tmpFile.delete()
+                    val msg = "SHA256 mismatch: expected $expectedSha256, got $sha256"
+                    onProgress?.invoke(msg)
+                    Log.w(TAG, msg)
+                    return JdkResult(null, false, msg)
+                }
+            } else {
+                val msg = "No SHA-256 available for JDK $version — hash verification skipped"
                 onProgress?.invoke(msg)
                 Log.w(TAG, msg)
-                return JdkResult(null, false, msg)
             }
 
             // Extract

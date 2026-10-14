@@ -636,8 +636,10 @@ class TerminalEmulator(
         for (row in 0 until rows) {
             lines[row] = newRow()
         }
-        cursorRow = 0
-        cursorCol = 0
+        // Cursor position is left alone on purpose: ESC[2J/ESC[3J do not move
+        // the cursor in a real terminal (the shell's `clear` homes it with a
+        // preceding ESC[H), and the app-side clear() wants the cursor to
+        // stay on the shell's line. Callers decide whether to home.
     }
 
     private fun eraseFromCursorToEOL() {
@@ -689,7 +691,14 @@ class TerminalEmulator(
 
     fun clear() {
         eraseAll()
-        cursorRow = 0
+        /*
+         * Match the shell exactly: this runs right before a Ctrl-U kill line,
+         * which empties the input buffer but keeps the cursor on the SAME row
+         * at column 0. Homing to (0,0) here would draw the cursor and the
+         * dynamic prompt at the top-left while the shell is still further
+         * down ("지우기 눌려도 커서가 맨앞으로 가면 안됨").
+         */
+        cursorRow = cursorRow.coerceIn(0, rows - 1)
         cursorCol = 0
         scrollBackBuffer.clear()
         onScreenUpdate?.invoke()

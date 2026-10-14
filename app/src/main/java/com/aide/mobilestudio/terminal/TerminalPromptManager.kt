@@ -25,9 +25,57 @@ class TerminalPromptManager {
      * Format the prompt string with path abbreviation.
      * Returns: "~/MobileStudio/KotlinApp >"
      */
-    fun formatPrompt(): String {
-        val displayPath = abbreviatePath(cwd, homeDir)
-        return "$displayPath >"
+    fun formatPrompt(): String = formatPrompt(Int.MAX_VALUE)
+
+    /**
+     * Format the prompt the way a normal terminal does and guarantee it fits.
+     *
+     * Rendering rules:
+     * - "~" when the working directory IS home or under home, otherwise the
+     *   ABSOLUTE path (no middle abbreviation): /sdcard/Download renders as
+     *   "/sdcard/Download >".
+     * - The prompt is drawn on a monospace grid, so [maxColumns] is measured
+     *   in characters (columns), not pixels.
+     * - When the rendered prompt would be wider than [maxColumns] columns,
+     *   the FRONT of the path is truncated with "..." keeping the tail, e.g.
+     *   ".../java/com/aide/mobilestudio >". The result never exceeds
+     *   [maxColumns] characters.
+     */
+    fun formatPrompt(maxColumns: Int): String {
+        if (maxColumns <= 0) return ""
+        val path = displayPathFor(cwd, homeDir)
+        val prompt = path + PROMPT_SUFFIX
+        if (prompt.length <= maxColumns) return prompt
+
+        // Room left for the tail of the path once "..." and the suffix fit.
+        val keep = maxColumns - ELLIPSIS.length - PROMPT_SUFFIX.length
+        return if (keep <= 0) {
+            // Degenerate budget: cannot even fit "... >", keep the tail only.
+            prompt.takeLast(maxColumns)
+        } else {
+            // We only get here when prompt.length > maxColumns, hence
+            // path.length > keep and the substring is always valid.
+            ELLIPSIS + path.substring(path.length - keep) + PROMPT_SUFFIX
+        }
+    }
+
+    /**
+     * Full display path for the prompt: "~" for home itself, "~/..." under
+     * home, otherwise the absolute path unchanged.
+     */
+    private fun displayPathFor(path: String, home: String): String {
+        // Normalize path
+        val normalizedPath = if (path.endsWith("/") && path.length > 1) path.substring(0, path.length - 1) else path
+        val normalizedHome = if (home.endsWith("/") && home.length > 1) home.substring(0, home.length - 1) else home
+
+        // Replace home with ~
+        return if (normalizedPath == normalizedHome) {
+            "~"
+        } else if (normalizedPath.startsWith("$normalizedHome/")) {
+            "~" + normalizedPath.substring(normalizedHome.length)
+        } else {
+            normalizedPath
+        }
     }
 
     /**
@@ -36,18 +84,7 @@ class TerminalPromptManager {
      * - If the path is very long, keeps the first component (~) and the last two/three components.
      */
     fun abbreviatePath(path: String, home: String = homeDir): String {
-        // Normalize path
-        val normalizedPath = if (path.endsWith("/") && path.length > 1) path.substring(0, path.length - 1) else path
-        val normalizedHome = if (home.endsWith("/") && home.length > 1) home.substring(0, home.length - 1) else home
-
-        // Replace home with ~
-        val displayPath = if (normalizedPath == normalizedHome) {
-            "~"
-        } else if (normalizedPath.startsWith("$normalizedHome/")) {
-            "~" + normalizedPath.substring(normalizedHome.length)
-        } else {
-            normalizedPath
-        }
+        val displayPath = displayPathFor(path, home)
 
         // If short enough (e.g. < 40 chars), return as-is
         if (displayPath.length <= 40) return displayPath
@@ -114,5 +151,13 @@ class TerminalPromptManager {
             else -> "$cwd/$target"
         }
         return resolved
+    }
+
+    private companion object {
+        /** The prompt always ends with this marker for the user to type after. */
+        const val PROMPT_SUFFIX = " >"
+
+        /** Marker for the front-truncated part of a too-wide path. */
+        const val ELLIPSIS = "..."
     }
 }

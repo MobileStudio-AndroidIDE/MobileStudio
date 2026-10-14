@@ -93,6 +93,25 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
             val start = System.currentTimeMillis()
             val errors = mutableListOf<String>()
             try {
+                // ---- [Provision] build-time tool provisioning ----
+                // First launch only asks for a language (BuildBootActivity) —
+                // no tool downloads happen at boot anymore. Everything the
+                // build needs is ensured here, right before Gradle runs.
+                // Every step is marker/ELF-guarded, so repeated builds never
+                // re-download what is already installed. JDK/Gradle failures
+                // abort the build; native-tool failures only warn.
+                val provisionError = BuildProvisioner.provision(
+                    context = context,
+                    projectDir = projectDir,
+                    installer = installer,
+                    emit = { line, level -> emit(onLine, line, level) }
+                )
+                if (provisionError != null) {
+                    emit(onLine, provisionError, LineLevel.ERROR)
+                    emit(onDone, BuildResult(false, System.currentTimeMillis() - start, errors))
+                    return@submit
+                }
+
                 check(installer.isJdkInstalled) { "JDK is not installed" }
                 check(installer.isGradleInstalled) { "Gradle is not installed" }
 
@@ -126,35 +145,25 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
                 installer.ensureGradleLauncherReadyForAndroid(allowDaemon = gradleDaemonEnabled)
                 installer.removeTermuxLeftovers(installer.effectiveJavaHome)
 
-                // ---- CMake/Ninja toolchain repair (externalNativeBuild) ----
-                // 1) The arm64 CMake runtime must exist as a REAL ELF. It is
-                //    downloaded only from the MobileStudio GitHub release
-                //    (SHA-256 verified) — never Termux/apt/system CMake. Older
-                //    symlink-repair passes can destroy it (self-loops), so this
-                //    runs before every build and re-downloads when damaged.
-                runCatching {
-                    CmakeRuntimeManager.get(context).ensureInstalledBlocking(
-                        onLog = { emit(onLine, it, LineLevel.INFO) },
-                        onProgress = { read, total ->
-                            val mb = read / (1024L * 1024L)
-                            if (mb > 0 && mb % 4 == 0L) {
-                                emit(onLine, "> [CMake] downloading: $mb MB / ${total / (1024L * 1024L)} MB", LineLevel.INFO)
-                            }
-                        }
-                    )
-                }.onFailure {
-                    emit(onLine, "> [CMake] WARN: runtime ensure failed: ${it.message}", LineLevel.WARNING)
-                }
-                // 2) AGP execs <sdk>/cmake/<ver>/bin/{cmake,ninja} directly,
-                //    which Android denies for app-data ELFs. Replace those
-                //    entries (files or symlinks) with linker64 wrapper scripts.
-                runCatching {
-                    NativeToolWrappers.ensureSdkWrappers(
-                        sdkDir = androidSdkDir,
-                        toolchainRoot = File(context.filesDir, "toolchain")
-                    ).forEach { line -> emit(onLine, line, LineLevel.INFO) }
-                }.onFailure {
-                    emit(onLine, "> [CMake] WARN: wrapper repair failed: ${it.message}", LineLevel.WARNING)
+                // ---- CMake/Ninja wrapper repair (externalNativeBuild) ----
+                // The CMake runtime, ninja and NDK themselves are provisioned
+                // lazily by BuildProvisioner above — and ONLY for projects that
+                // actually contain native code, so plain Java/Kotlin builds
+                // never wait on (or download) native tools. Here we only repair
+                // the SDK wrapper scripts AGP execs (local, cheap, no network).
+                if (BuildProvisioner.needsNativeTooling(projectDir)) {
+                    // AGP execs <sdk>/cmake/<ver>/bin/{cmake,ninja} directly,
+                    // which Android denies for app-data ELFs. Replace those
+                    // entries (files or symlinks) with linker64 wrapper scripts.
+                    runCatching {
+                        NativeToolWrappers.ensureSdkWrappers(
+                            sdkDir = androidSdkDir,
+                            toolchainRoot = File(context.filesDir, "toolchain"),
+                            filesDir = context.filesDir
+                        ).forEach { line -> emit(onLine, line, LineLevel.INFO) }
+                    }.onFailure {
+                        emit(onLine, "> [CMake] WARN: wrapper repair failed: ${it.message}", LineLevel.WARNING)
+                    }
                 }
 
                 writeLocalProperties(projectDir, androidSdkDir)
@@ -493,13 +502,11 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
         add("-Dfile.encoding=UTF-8")
         add("-Dsun.jnu.encoding=UTF-8")
         add("-jar"); add(launcherJar.absolutePath)
-        hostAbiFilter()?.let { add("-Pandroid.injected.build.abi=$it") }
+        addAll(injectedArgs(System.getProperty("os.arch")))
         addAll(tasks)
         addAll(BuildToolsConfig.buildGradleCliArgs(context))
         add("--project-dir"); add(projectDir.absolutePath)
     }
-
-    private fun hostAbiFilter(): String? = abiFilterFor(System.getProperty("os.arch"))
 
     private fun ensureNativeGradleDaemon(
         javaBin: File,
@@ -603,10 +610,12 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
         // fallbacks from the tool path itself and keeps the original path when
         // the port is missing (no blind substitution).
         val toolchainRoot = File(context.filesDir, "toolchain")
+        // Prefer the user-installed StudioShellTools arm64 tool (<files>/tools/<tool>/
+        // bin/<tool>) before the toolchain ports; this is the app's known-good ninja.
         val portedCmakeFile: File? =
-            NativeToolWrappers.findExecutableTool(toolchainRoot, "cmake")?.first
+            NativeToolWrappers.resolvePortedTool(context.filesDir, toolchainRoot, "cmake")?.first
         val portedNinjaFile: File? =
-            NativeToolWrappers.findExecutableTool(toolchainRoot, "ninja")?.first
+            NativeToolWrappers.resolvePortedTool(context.filesDir, toolchainRoot, "ninja")?.first
         val ndkDirs = resolveAllAndroidNdkDirs()
         val llvmSearchRoots = buildList {
             ndkDirs.forEach { add(it.absolutePath) }
@@ -623,6 +632,12 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
             // Ported arm64 cmake libs resolve before the SDK cmake's (the
             // native tool shim redirects native builds to the ported binary).
             portedCmakeFile?.parentFile?.parentFile?.let {
+                add(File(it, "lib").absolutePath)
+                add(File(it, "bin").absolutePath)
+            }
+            // Ported ninja (<files>/tools/ninja/bin/ninja or toolchain port):
+            // expose its lib/ so its bundled libc++_shared.so resolves.
+            portedNinjaFile?.parentFile?.parentFile?.let {
                 add(File(it, "lib").absolutePath)
                 add(File(it, "bin").absolutePath)
             }
@@ -1063,6 +1078,21 @@ class GradleRunner(private val context: Context, private val installer: JreGradl
             "x86_64", "amd64" -> "x86_64"
             "x86", "i386", "i686" -> "x86"
             else -> null
+        }
+
+        /**
+         * Gradle properties injected into every build.
+         *
+         * - `android.injected.build.abi`: see [abiFilterFor].
+         * - `android.injected.testOnly=false`: Android Studio's "Run" injects
+         *   `android.injected.testOnly=true`, which makes AGP stamp
+         *   `android:testOnly="true"` onto the merged manifest. The system
+         *   installer then rejects the package (only `adb install -t` works).
+         *   MobileStudio builds APKs for normal installation, so force it off.
+         */
+        internal fun injectedArgs(arch: String?): List<String> = buildList {
+            abiFilterFor(arch)?.let { add("-Pandroid.injected.build.abi=$it") }
+            add("-Pandroid.injected.testOnly=false")
         }
     }
 }

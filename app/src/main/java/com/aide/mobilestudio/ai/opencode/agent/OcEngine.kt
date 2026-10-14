@@ -2,7 +2,10 @@ package com.aide.mobilestudio.ai.opencode.agent
 
 import android.content.Context
 import com.aide.mobilestudio.ai.AiSettings
-import com.aide.mobilestudio.analysis.ErrorFingerprint
+import com.aide.mobilestudio.ai.agent.CheckpointFileDelta
+import com.aide.mobilestudio.ai.agent.CheckpointOutcome
+import com.aide.mobilestudio.ai.agent.CheckpointStore
+import com.aide.mobilestudio.ai.agent.FileMentions
 import com.aide.mobilestudio.ai.agent.ModelManager
 import com.aide.mobilestudio.ai.api.AIProvider
 import com.aide.mobilestudio.ai.opencode.command.OcCommandInfo
@@ -22,6 +25,11 @@ import com.aide.mobilestudio.ai.opencode.session.OcSessionStore
 import com.aide.mobilestudio.ai.opencode.session.OcSnapshot
 import com.aide.mobilestudio.ai.opencode.skill.OcSkill
 import com.aide.mobilestudio.ai.opencode.tool.*
+import com.aide.mobilestudio.ai.validation.DiagnosticDiffEngine
+import com.aide.mobilestudio.ai.validation.LiveDiagnostic
+import com.aide.mobilestudio.ai.validation.LiveDiagnostics
+import com.aide.mobilestudio.ai.resource.AndroidMemoryProbe
+import com.aide.mobilestudio.ai.resource.TaskScheduler
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,6 +55,13 @@ class OcEngine(private val context: Context) : EngineBridge {
             onAnswer(null)
         }
         fun onCommandOutput(commandId: String, line: String) {}
+        /** Fired after a write/edit/patch tool completed, with the affected path. */
+        fun onFileChanged(path: String) {}
+        /**
+         * Inline, non-error notice (unknown /command, unresolved @file, ...).
+         * Surfaces render it as a system bubble; message flow is never blocked.
+         */
+        fun onNotice(text: String) {}
     }
 
     enum class RiskLevel { READ_ONLY, BUILD, MODIFY, DANGEROUS }
@@ -88,6 +103,17 @@ class OcEngine(private val context: Context) : EngineBridge {
     private var activeMessageId: String = ""
     private var subagentDepth = 0
 
+    // --- Checkpoints (/undo //redo): persisted per session under filesDir/ai/checkpoints ---
+    private val checkpointStore = CheckpointStore(File(context.filesDir, "ai/checkpoints"))
+
+    /** Groups every file mutation of one user request so /undo rolls back the whole turn. */
+    @Volatile
+    private var currentTurnId: String = ""
+
+    // --- @file mentions: resolved once per queued message, attached at request time ---
+    @Volatile
+    private var pendingMentionContext: String? = null
+
     private data class PendingMessage(val text: String, val imageBase64: String? = null)
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -96,12 +122,14 @@ class OcEngine(private val context: Context) : EngineBridge {
     private var isRunning = false
 
     private var currentFileContext: String? = null
+    private var currentFilePath: String? = null
 
     fun setAgentMode(mode: String) {
         agentName = mode
     }
 
     fun setCurrentFileContext(filePath: String?, content: String?, selection: String? = null) {
+        currentFilePath = filePath
         if (filePath == null || content == null || content.isBlank()) {
             currentFileContext = null
             return
@@ -114,6 +142,12 @@ class OcEngine(private val context: Context) : EngineBridge {
         sb.append(content.take(6_000))
         currentFileContext = sb.toString()
     }
+
+    /** Absolute path of the file set via [setCurrentFileContext], if any. */
+    fun currentFileContextPath(): String? = currentFilePath
+
+    /** Project root the agent operates on (used by @file mentions). */
+    fun workspaceRoot(): File = projectDir ?: config.worktree
 
     fun estimateTokens(): Int {
         val session = currentSession ?: return 0
@@ -140,9 +174,13 @@ class OcEngine(private val context: Context) : EngineBridge {
     }
 
     private fun worktreeOf(context: Context): File {
+        projectDir?.let { return it }
         val project = (context as? com.aide.mobilestudio.MainActivity)?.currentProjectDir
         return project ?: File(context.filesDir, "workspace").apply { mkdirs() }
     }
+
+    /** Project root override for hosts that are not [com.aide.mobilestudio.MainActivity]. */
+    var projectDir: File? = null
 
     private val toolContext: ToolContext
         get() = toolContextFor(currentSession?.id ?: "")
@@ -210,6 +248,8 @@ class OcEngine(private val context: Context) : EngineBridge {
         activeMessageId = session.messages.optJSONObject(session.messages.length() - 1)?.optString("id") ?: ""
         readFiles.clear()
         toolCallCounts.clear()
+        currentTurnId = ""
+        pendingMentionContext = null
         snapshots.clear(session.id)
         listener?.onStateChange(AgentState.IDLE)
     }
@@ -261,6 +301,57 @@ class OcEngine(private val context: Context) : EngineBridge {
     }
 
     fun listCommands(): List<OcCommandInfo> = runCatching { commandRegistry.list() }.getOrDefault(emptyList())
+
+    fun listProviders(): List<Pair<String, String>> = providerRegistry.listProviders()
+
+    fun listProviderModels(providerId: String): List<OcModelInfo> = providerRegistry.listModels(providerId)
+
+    fun currentModelLabel(): String = currentModelRef()?.toString() ?: "none"
+
+    fun currentTodos(): JSONArray = currentSession?.let { runCatching { store.load(it.id)?.todos }.getOrNull() }
+        ?: JSONArray()
+
+    /** Replaces the current session's todo list (used by structural plan editing). */
+    fun updateTodos(todos: JSONArray) {
+        val session = currentSession ?: return
+        store.setTodos(session, todos)
+        listener?.onTodos(todos)
+    }
+
+    fun latestBackupForCurrentSession(path: String): File? =
+        currentSession?.let { runCatching { snapshots.latestBackup(it.id, path) }.getOrNull() }
+
+    fun mcpServerNames(): List<String> = mcpServers.map { it.name }
+
+    /** Names of tools currently registered with the engine. */
+    fun toolNames(): List<String> = toolRegistry.names()
+
+    /** Adds a local MCP server to the global config and reloads. */
+    fun addMcpServer(name: String, command: List<String>) {
+        OpencodeConfig.upsertMcpServer(context, name, command)
+        reloadConfig()
+    }
+
+    fun removeMcpServer(name: String): Boolean {
+        val removed = OpencodeConfig.removeMcpServer(context, name)
+        if (removed) reloadConfig()
+        return removed
+    }
+
+    /** Probes an MCP server's `tools/list`. Runs on IO; returns a human-readable status. */
+    suspend fun testMcpServer(name: String): String {
+        val server = mcpServers.firstOrNull { it.name == name }
+            ?: return "Unknown MCP server: $name"
+        return withContext(Dispatchers.IO) {
+            val tools = runCatching { mcpClient.listTools(server) }.getOrNull()
+            if (tools == null) {
+                "MCP '$name': no response (server not running or not reachable)"
+            } else {
+                "MCP '$name': ${tools.size} tool(s)" +
+                    if (tools.isNotEmpty()) " — ${tools.take(6).joinToString(", ") { it.name }}" else ""
+            }
+        }
+    }
 
     fun listAgents(): List<OcAgent> = agentRegistry.listVisible()
 
@@ -349,6 +440,18 @@ class OcEngine(private val context: Context) : EngineBridge {
         isRunning = true
         currentJob = scope.launch {
             try {
+                // Resolve @file mentions off the main thread, once per message:
+                // the block is attached to every request of this agent turn.
+                val resolution = withContext(Dispatchers.IO) { resolveMentions(text.text) }
+                pendingMentionContext = resolution.block
+                if (resolution.unknown.isNotEmpty()) {
+                    listener?.onNotice(
+                        "[@file] not found: " +
+                            resolution.unknown.joinToString(", ") { "@$it" } +
+                            " — message sent without it.",
+                    )
+                }
+                currentTurnId = OcMessage.nextId("turn")
                 addUserMessage(text.text, text.imageBase64)
                 runLoop(session, agentRegistry.get(agentName), 0)
                 listener?.onStateChange(AgentState.COMPLETED)
@@ -358,6 +461,7 @@ class OcEngine(private val context: Context) : EngineBridge {
                 listener?.onError(e.message ?: "Unknown error during agent loop")
                 listener?.onStateChange(AgentState.ERROR)
             } finally {
+                pendingMentionContext = null
                 isRunning = false
                 if (queue.isNotEmpty() && isActive) {
                     pumpQueue()
@@ -416,7 +520,7 @@ class OcEngine(private val context: Context) : EngineBridge {
                     continue
                 }
             }
-            val history = buildHistory(systemText, messages)
+            val history = buildHistory(session, systemText, messages)
             val visible = visibleTools(agent)
             val toolDefs = toolRegistry.definitions(visible, ctx)
             val provider = providerRegistry.createProvider(model.ref, runtimeOptions)
@@ -483,12 +587,28 @@ class OcEngine(private val context: Context) : EngineBridge {
                 return lastText
             }
 
+            val canParallelize = depth == 0 &&
+                pendingTools.size >= 2 &&
+                pendingTools.all { it.second.name in READ_ONLY_TOOLS } &&
+                pendingTools.all { (_, call) ->
+                    val tool = toolRegistry.get(call.name) ?: return@all false
+                    val hash = call.args?.toString() ?: "{}"
+                    permissionActionFor(tool, call, agent, ctx, currentToolCallCount(call.name, hash)) == "allow"
+                }
+
+            if (canParallelize) {
+                executeReadOnlyToolsInParallel(session, assistant, pendingTools, ctx)
+                if (!isActiveLoop()) {
+                    listener?.onStateChange(AgentState.CANCELLED)
+                    return lastText
+                }
+            } else {
             for ((part, call) in pendingTools) {
                 if (!isActiveLoop()) {
                     listener?.onStateChange(AgentState.CANCELLED)
                     return lastText
                 }
-                val beforeFingerprints = if (depth == 0) getGlobalErrorFingerprints() else emptyList()
+                val beforeDiagnostics = if (depth == 0) getGlobalDiagnostics() else emptyList()
                 listener?.onStateChange(AgentState.PROCESSING_TOOL_RESULT)
                 val state = executeToolCall(call, agent, ctx)
                 part.put("state", state)
@@ -498,8 +618,14 @@ class OcEngine(private val context: Context) : EngineBridge {
                 if (depth == 0 && call.name in setOf("write", "edit", "patch") &&
                     state.optString("status") == "completed"
                 ) {
-                    handlePostWriteAnalysis(beforeFingerprints, session)
+                    handlePostWriteAnalysis(beforeDiagnostics, session)
                 }
+                if (call.name in setOf("write", "edit", "patch") && state.optString("status") == "completed") {
+                    val changed = call.args.optString("filePath", "")
+                        .ifEmpty { call.args.optString("path", "") }
+                    if (changed.isNotEmpty()) listener?.onFileChanged(changed)
+                }
+            }
             }
 
             iterations++
@@ -534,7 +660,24 @@ class OcEngine(private val context: Context) : EngineBridge {
         })
     }
 
-    private fun buildHistory(systemText: String, messages: List<JSONObject>): JSONArray {
+    private class MentionResolution(val block: String?, val unknown: List<String>)
+
+    /** Resolves @path tokens in [text] into a context block (runs on IO). */
+    private fun resolveMentions(text: String): MentionResolution {
+        val mentions = FileMentions.extract(text)
+        if (mentions.isEmpty()) return MentionResolution(null, emptyList())
+        val resolved = runCatching { FileMentions.resolve(workspaceRoot(), mentions) }.getOrNull()
+            ?: return MentionResolution(null, mentions)
+        val block = FileMentions.formatContextBlock(resolved)
+        val unknown = resolved.filter { it.path == null }.map { it.mention }
+        return MentionResolution(block.ifEmpty { null }, unknown)
+    }
+
+    private fun buildHistory(
+        session: OcSessionStore.Session?,
+        systemText: String,
+        messages: List<JSONObject>,
+    ): JSONArray {
         val arr = JSONArray()
         arr.put(
             JSONObject().apply {
@@ -542,7 +685,31 @@ class OcEngine(private val context: Context) : EngineBridge {
                 put("parts", JSONArray().put(OcMessage.textPart(systemText)))
             },
         )
-        for (msg in messages) arr.put(msg)
+        // Request-time context (@file mentions + the open editor file) is
+        // appended to a COPY of the last user message: every request of the
+        // turn carries it, while the stored transcript stays clean.
+        val isTopLevel = session != null && session.id == currentSession?.id
+        val contextParts = mutableListOf<String>()
+        if (isTopLevel) {
+            pendingMentionContext?.let { contextParts.add(it) }
+            currentFileContext?.let { contextParts.add("---EDITOR CONTEXT---\n$it") }
+        }
+        val contextText = contextParts.joinToString("\n\n")
+        var lastUserIndex = -1
+        if (contextText.isNotEmpty()) {
+            for (i in messages.indices) if (OcMessage.isUser(messages[i])) lastUserIndex = i
+        }
+        for ((i, msg) in messages.withIndex()) {
+            if (i == lastUserIndex) {
+                val copy = JSONObject(msg.toString())
+                val part = OcMessage.textPart(contextText, synthetic = true)
+                part.put("ignored", true)
+                OcMessage.addPart(copy, part)
+                arr.put(copy)
+            } else {
+                arr.put(msg)
+            }
+        }
         return arr
     }
 
@@ -584,16 +751,8 @@ class OcEngine(private val context: Context) : EngineBridge {
         val pattern = tool.resourcePattern(call.args, ctx)
         val risk = tool.riskHint(call.args, ctx)
         val rules = agent.permission + savedPermissions()
-        var action = Permission.evaluate(permissionKey, pattern, rules).action
+        var action = permissionActionFor(tool, call, agent, ctx, callCount)
         val external = externalResource(tool, call.args, ctx)
-        if (external != null) {
-            val extAction = Permission.evaluate("external_directory", external, rules).action
-            if (extAction == "deny") action = "deny"
-            else if (extAction == "ask" && action != "deny") action = "ask"
-        }
-        val doom = Permission.evaluate("doom_loop", "*", rules).action
-        if (doom == "deny") action = "deny"
-        else if (doom == "ask" && callCount >= 3) action = "ask"
 
         if (action == "deny") {
             listener?.onStateChange(AgentState.PROCESSING_TOOL_RESULT)
@@ -615,6 +774,9 @@ class OcEngine(private val context: Context) : EngineBridge {
         }
 
         listener?.onStateChange(AgentState.EXECUTING_TOOL)
+        // Single capture hook for /undo //redo: before ANY file-mutating tool
+        // runs, checkpoint the affected file's pre-edit content.
+        if (call.name in CHECKPOINT_TOOLS) captureCheckpoint(call.args, ctx)
         val result = try {
             tool.execute(call.args ?: JSONObject(), ctx)
         } catch (e: CancellationException) {
@@ -625,6 +787,120 @@ class OcEngine(private val context: Context) : EngineBridge {
         state.put("status", if (result.isError) "error" else "completed")
         state.put("output", result.output)
         return state
+    }
+
+    /** Tools whose successful run mutates a project file. */
+    private val CHECKPOINT_TOOLS = setOf("write", "edit", "patch")
+
+    /**
+     * Checkpoints the pre-edit content of the file a mutating tool is about to
+     * touch. Content is read on IO; missing files are recorded as "created"
+     * (undo deletes them). One call site: [executeToolCall].
+     */
+    private suspend fun captureCheckpoint(args: JSONObject?, ctx: ToolContext) {
+        val path = args?.optString("filePath", "")?.ifEmpty { args.optString("path", "") }
+        if (path.isNullOrEmpty()) return
+        val turn = currentTurnId.ifEmpty { OcMessage.nextId("turn") }
+        withContext(Dispatchers.IO) {
+            runCatching { checkpointStore.capture(ctx.sessionId, turn, ctx.resolveInWorkspace(path)) }
+        }
+    }
+
+    /** Files the next /undo would restore, with line-count deltas (IO). */
+    fun pendingUndoDeltas(): List<CheckpointFileDelta> {
+        val sessionId = currentSession?.id ?: return emptyList()
+        return runCatching { checkpointStore.describeUndo(sessionId) }.getOrDefault(emptyList())
+    }
+
+    /** Rolls back all files of the newest checkpointed turn. Blocking IO. */
+    fun undoLastTurn(): CheckpointOutcome {
+        val sessionId = currentSession?.id ?: return CheckpointOutcome.NothingToUndo
+        val outcome = runCatching { checkpointStore.undo(sessionId) }.getOrElse {
+            return CheckpointOutcome.Failed(it.message ?: "undo failed", emptyList())
+        }
+        if (outcome is CheckpointOutcome.Undone) {
+            for (path in outcome.files) listener?.onFileChanged(path)
+        }
+        return outcome
+    }
+
+    /** Re-applies the most recently undone turn. Blocking IO. */
+    fun redoLastTurn(): CheckpointOutcome {
+        val sessionId = currentSession?.id ?: return CheckpointOutcome.NothingToRedo
+        val outcome = runCatching { checkpointStore.redo(sessionId) }.getOrElse {
+            return CheckpointOutcome.Failed(it.message ?: "redo failed", emptyList())
+        }
+        if (outcome is CheckpointOutcome.Redone) {
+            for (path in outcome.files) listener?.onFileChanged(path)
+        }
+        return outcome
+    }
+
+    /** Shared permission decision (used by both sequential and parallel execution). */
+    private fun permissionActionFor(
+        tool: OcTool,
+        call: AIProvider.StreamEvent.ToolCall,
+        agent: OcAgent,
+        ctx: ToolContext,
+        callCount: Int,
+    ): String {
+        val rules = agent.permission + savedPermissions()
+        var action = Permission.evaluate(tool.permissionKey(), tool.resourcePattern(call.args, ctx), rules).action
+        val external = externalResource(tool, call.args, ctx)
+        if (external != null) {
+            val extAction = Permission.evaluate("external_directory", external, rules).action
+            if (extAction == "deny") action = "deny"
+            else if (extAction == "ask" && action != "deny") action = "ask"
+        }
+        val doom = Permission.evaluate("doom_loop", "*", rules).action
+        if (doom == "deny") action = "deny"
+        else if (doom == "ask" && callCount >= 3) action = "ask"
+        return action
+    }
+
+    private fun currentToolCallCount(tool: String, argsHash: String): Int =
+        toolCallCounts["$tool|$argsHash"] ?: 0
+
+    /**
+     * Runs several auto-allowed read-only tools concurrently with a parallelism
+     * chosen by the resource policy. Only reached when every call is read-only
+     * and already permitted (no approval prompt is bypassed).
+     */
+    private suspend fun executeReadOnlyToolsInParallel(
+        session: OcSessionStore.Session,
+        assistant: JSONObject,
+        pendingTools: List<Pair<JSONObject, AIProvider.StreamEvent.ToolCall>>,
+        ctx: ToolContext,
+    ) {
+        listener?.onStateChange(AgentState.EXECUTING_TOOL)
+        val snapshot = AndroidMemoryProbe.snapshot(context)
+        val tasks = pendingTools.map { (part, call) ->
+            suspend {
+                listener?.onToolStart(call.name, call.args)
+                val tool = toolRegistry.get(call.name)
+                val result = if (tool == null) {
+                    ToolResult("Unknown tool: ${call.name}", isError = true)
+                } else {
+                    try {
+                        tool.execute(call.args, ctx)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        ToolResult("${call.name} failed: ${e.message}", isError = true)
+                    }
+                }
+                Triple(part, call, result)
+            }
+        }
+        val outcome = taskScheduler.runAll(tasks, snapshot, loadedLocalModels = 0, buildRunning = false)
+        for ((part, call, result) in outcome.results) {
+            val state = JSONObject().put("input", call.args)
+                .put("status", if (result.isError) "error" else "completed")
+                .put("output", result.output)
+            part.put("state", state)
+            store.updatePart(session, assistant.optString("id"), part)
+            listener?.onToolEnd(call.name, result.output.take(2000))
+        }
     }
 
     private fun externalResource(tool: OcTool, args: JSONObject?, ctx: ToolContext): String? {
@@ -651,8 +927,7 @@ class OcEngine(private val context: Context) : EngineBridge {
     }
 
     private fun savedPermissions(): List<PermissionRule> = runCatching {
-        val json = JSONArray(context.getSharedPreferences(AiSettings.PREFS, Context.MODE_PRIVATE)
-            .getString(AiSettings.KEY_OC_PERMISSIONS, "[]") ?: "[]")
+        val json = JSONArray(AiSettings(context).ocPermissionsJson())
         val out = mutableListOf<PermissionRule>()
         for (i in 0 until json.length()) {
             val o = json.optJSONObject(i) ?: continue
@@ -666,20 +941,18 @@ class OcEngine(private val context: Context) : EngineBridge {
     }.getOrDefault(emptyList())
 
     private fun addSavedPermission(rule: PermissionRule) {
-        val prefs = context.getSharedPreferences(AiSettings.PREFS, Context.MODE_PRIVATE)
-        val arr = runCatching {
-            JSONArray(prefs.getString(AiSettings.KEY_OC_PERMISSIONS, "[]") ?: "[]")
-        }.getOrDefault(JSONArray())
+        val settings = AiSettings(context)
+        val arr = runCatching { JSONArray(settings.ocPermissionsJson()) }.getOrDefault(JSONArray())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             if (o.optString("permission") == rule.permission && o.optString("pattern") == rule.pattern) {
                 o.put("action", rule.action)
-                prefs.edit().putString(AiSettings.KEY_OC_PERMISSIONS, arr.toString()).apply()
+                settings.setOcPermissionsJson(arr.toString())
                 return
             }
         }
         arr.put(JSONObject().put("permission", rule.permission).put("action", rule.action).put("pattern", rule.pattern))
-        prefs.edit().putString(AiSettings.KEY_OC_PERMISSIONS, arr.toString()).apply()
+        settings.setOcPermissionsJson(arr.toString())
     }
 
     override suspend fun spawnSubagent(
@@ -893,34 +1166,42 @@ class OcEngine(private val context: Context) : EngineBridge {
     }
 
     private val fixAttempts = mutableMapOf<String, Int>()
+    private val validationDiff = DiagnosticDiffEngine()
+    private val taskScheduler = TaskScheduler()
+
+    /** Tools that only read state and can safely run concurrently. */
+    private val READ_ONLY_TOOLS = setOf("read", "glob", "grep", "webfetch", "websearch")
 
     private suspend fun handlePostWriteAnalysis(
-        beforeFingerprints: List<ErrorFingerprint>,
+        beforeDiagnostics: List<LiveDiagnostic>,
         session: OcSessionStore.Session,
     ) {
         listener?.onThinking("Analyzing changes...")
         val activity = context as? com.aide.mobilestudio.MainActivity
         activity?.triggerLiveDiagnosticsAndWait()?.join()
         delay(1000)
-        val afterErrors = activity?.getTotalErrorCount() ?: 0
-        val afterFingerprints = getGlobalErrorFingerprints()
-        val fixed = beforeFingerprints.count { it !in afterFingerprints }
-        val introduced = afterFingerprints.count { it !in beforeFingerprints }
+        val after = getGlobalDiagnostics()
+        val diff = validationDiff.diff(beforeDiagnostics, after)
+        val introduced = diff.newErrorCount
+        val fixed = diff.resolvedErrorCount
+        val remaining = diff.remainingErrorCount
 
         if (introduced > 0) {
-            val errorDetails = activity?.getErrorsAsText() ?: ""
-            listener?.onMessage("[compiler] This change introduced $introduced error(s).", false)
+            listener?.onMessage("[compiler] ${diff.report().replace("\n", " · ")}", false)
+            val newDetails = diff.new.joinToString("\n") { d ->
+                "${d.file}:${d.line}:${d.column}: ${d.message}"
+            }
             val fb = OcMessage.userMessage(session.id, "compiler_feedback", null)
             OcMessage.addPart(
                 fb,
                 OcMessage.textPart(
-                    "[compiler_feedback] The previous write introduced $introduced new errors:\n" +
-                        "$errorDetails\nPlease fix them.",
+                    "[compiler_feedback] The previous write introduced $introduced new error(s):\n" +
+                        "$newDetails\nPlease fix them.",
                 ),
             )
             store.updateMessage(session, fb)
             activeMessageId = fb.optString("id")
-            val key = afterFingerprints.joinToString(",") { "${it.file}:${it.line}:${it.normalizedMessage}" }
+            val key = diff.new.joinToString(",") { "${it.file}:${it.line}:${it.message}" }
             val attempts = fixAttempts.getOrDefault(key, 0)
             if (attempts >= 5) {
                 listener?.onMessage("[compiler] Auto-fix attempts (5) exceeded. Manual intervention required.", false)
@@ -929,15 +1210,21 @@ class OcEngine(private val context: Context) : EngineBridge {
             }
         } else if (fixed > 0) {
             listener?.onMessage("[compiler] This change fixed $fixed error(s).", false)
-            if (afterErrors == 0) listener?.onMessage("[compiler] All errors resolved.", false)
-        } else if (afterErrors == 0 && activity != null) {
+            if (remaining == 0) listener?.onMessage("[compiler] All errors resolved.", false)
+        } else if (remaining == 0 && activity != null) {
             listener?.onMessage("[compiler] No errors introduced.", false)
+        }
+        if (diff.uncertain.isNotEmpty()) {
+            listener?.onMessage(
+                "[compiler] ${diff.uncertain.size} diagnostic(s) matched only by similarity; classification is uncertain.",
+                false,
+            )
         }
     }
 
-    private fun getGlobalErrorFingerprints(): List<ErrorFingerprint> {
+    private fun getGlobalDiagnostics(): List<LiveDiagnostic> {
         val activity = context as? com.aide.mobilestudio.MainActivity ?: return emptyList()
-        return activity.getErrorFingerprints()
+        return LiveDiagnostics.fromProblems(activity.getAllProblems(), activity.currentProjectDir)
     }
 
     private fun RiskHint.toRiskLevel(): RiskLevel = when (this) {

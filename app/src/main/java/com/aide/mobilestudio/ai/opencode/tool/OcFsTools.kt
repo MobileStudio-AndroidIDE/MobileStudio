@@ -62,13 +62,13 @@ class BashTool : OcTool {
     override fun resourcePattern(args: JSONObject, ctx: ToolContext): String = args.optString("command", "")
 
     override fun riskHint(args: JSONObject, ctx: ToolContext): RiskHint {
-        val cmd = args.optString("command", "").lowercase()
-        return when {
-            cmd.contains("rm -rf") || cmd.contains("mkfs") || cmd.contains("dd if=") || cmd.contains("chmod 777") ->
-                RiskHint.DANGEROUS
-            cmd.startsWith("rm ") || cmd.startsWith("mv ") || cmd.startsWith("cp ") || cmd.contains(">") ->
-                RiskHint.MODIFY
-            else -> RiskHint.BUILD
+        val assessment = com.aide.mobilestudio.ai.shell.CommandRiskClassifier.classify(args.optString("command", ""))
+        return when (assessment.risk) {
+            com.aide.mobilestudio.ai.shell.CommandRisk.READ_ONLY -> RiskHint.READ_ONLY
+            com.aide.mobilestudio.ai.shell.CommandRisk.MUTATING -> RiskHint.MODIFY
+            com.aide.mobilestudio.ai.shell.CommandRisk.INSTALL -> RiskHint.MODIFY
+            com.aide.mobilestudio.ai.shell.CommandRisk.DESTRUCTIVE -> RiskHint.DANGEROUS
+            com.aide.mobilestudio.ai.shell.CommandRisk.SYSTEM -> RiskHint.DANGEROUS
         }
     }
 
@@ -217,7 +217,7 @@ class WriteTool : OcTool {
         return runCatching {
             file.parentFile?.mkdirs()
             file.writeText(content)
-            ToolResult("File written: ${file.absolutePath}")
+            ToolResult("File written: ${file.absolutePath}" + validateStructuredFile(file))
         }.getOrElse { ToolResult("Error writing file: ${it.message}", isError = true) }
     }
 }
@@ -276,7 +276,10 @@ class EditTool : OcTool {
         val updated = if (replaceAll) content.replace(oldString, newString) else content.replaceFirst(oldString, newString)
         return runCatching {
             file.writeText(updated)
-            ToolResult("File edited: ${file.absolutePath} ($count occurrence${if (count > 1) "s" else ""} replaced)")
+            ToolResult(
+                "File edited: ${file.absolutePath} ($count occurrence${if (count > 1) "s" else ""} replaced)" +
+                    validateStructuredFile(file),
+            )
         }.getOrElse { ToolResult("Error writing file: ${it.message}", isError = true) }
     }
 
@@ -387,4 +390,29 @@ class GrepTool : OcTool {
         if (results.isEmpty()) return ToolResult("No matches found")
         return ToolResult(results.joinToString("\n"))
     }
+}
+
+/**
+ * After an AI edit, JSON/JSONC files are validated immediately. Straightforward
+ * syntax mistakes are auto-repaired with deterministic rules (re-validated before
+ * being accepted); otherwise the exact failure location is surfaced so the model
+ * can correct it. Non-structured files are left untouched.
+ */
+private fun validateStructuredFile(file: File): String {
+    val ext = file.extension.lowercase()
+    if (ext != "json" && ext != "jsonc") return ""
+    val text = runCatching { file.readText() }.getOrNull() ?: return ""
+    val result = com.aide.mobilestudio.ai.validation.JsonValidator.validate(text)
+    if (result.valid) return "\nJSON validation: OK"
+    val repair = com.aide.mobilestudio.ai.validation.JsonRepairer.repair(text)
+    if (repair.success) {
+        return runCatching {
+            file.writeText(repair.repaired)
+            "\nJSON validation: syntax was auto-repaired (${repair.fixes.joinToString(", ")})."
+        }.getOrElse {
+            "\nJSON validation: invalid — ${result.issues.firstOrNull()?.toShortString()} (auto-repair write failed)"
+        }
+    }
+    val issue = result.issues.firstOrNull()
+    return "\nJSON validation FAILED at ${issue?.line ?: "?"}:${issue?.column ?: "?"}: ${issue?.message ?: "invalid JSON"}"
 }

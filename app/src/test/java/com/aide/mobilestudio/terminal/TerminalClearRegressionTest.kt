@@ -70,7 +70,10 @@ class TerminalClearRegressionTest {
     fun `ESC 3J variant`() {
         val em = fresh()
         for (i in 0 until 10) em.processString("line$i\r\n")
-        em.processString("clear" + ESC + "[3J")
+        // Real `clear` (ncurses) always homes the cursor first: ESC[H before
+        // the erases. ESC[2J/ESC[3J alone never move the cursor in a real
+        // terminal, so eraseAll() must not home behind the program's back.
+        em.processString("clear\r\n" + ESC + "[H" + ESC + "[3J")
         em.processString("ls ")
         assertEquals("ls", cursorLine(em))
     }
@@ -112,5 +115,93 @@ class TerminalClearRegressionTest {
         assertEquals(0, boundedBackspaces(requested = 0, shellLineLength = 0))
         // Defensive: a negative request erases nothing.
         assertEquals(0, boundedBackspaces(requested = -3, shellLineLength = 4))
+    }
+
+    // ------------------------------------------------- cursor after the Clear button
+    //
+    // "지우기 눌려도 커서가 맨앞으로 가면 안됨" — the app's Clear button wipes the
+    // screen and then sends Ctrl-U (kill line). Ctrl-U empties the shell's
+    // input buffer but keeps the cursor on the SAME row at column 0, so the
+    // app-side clear() must do exactly that instead of homing to (0,0).
+
+    @Test
+    fun `app clear keeps the cursor row and resets the column`() {
+        val em = fresh()
+        for (i in 0 until 3) em.processString("line$i\r\n")
+        em.processString("ls")
+        assertEquals(3, em.getCursorRow())
+
+        em.clear()
+
+        assertEquals(
+            "clear() must match Ctrl-U: same row, column 0",
+            3,
+            em.getCursorRow(),
+        )
+        assertEquals(0, em.getCursorCol())
+    }
+
+    @Test
+    fun `clear on the bottom row keeps the cursor at the bottom row`() {
+        val em = fresh(cols = 30, rows = 3)
+        em.processString("a\r\nb\r\nls")
+        assertEquals(2, em.getCursorRow())
+
+        em.clear()
+
+        // row preserved (clamp upper bound), column reset
+        assertEquals(2, em.getCursorRow())
+        assertEquals(0, em.getCursorCol())
+
+        em.processString("ls")
+        assertEquals("ls", cursorLine(em))
+    }
+
+    @Test
+    fun `echo after app clear lands on the preserved row`() {
+        val em = fresh()
+        for (i in 0 until 3) em.processString("line$i\r\n")
+        em.processString("ls")
+
+        // Clear button: app-side wipe followed by the Ctrl-U kill line.
+        em.clear()
+        em.processString("ls ")
+
+        assertEquals("ls", cursorLine(em))
+        assertEquals(3, em.getCursorRow())
+    }
+
+    @Test
+    fun `shell clear command still homes the cursor`() {
+        val em = fresh()
+        for (i in 0 until 3) em.processString("line$i\r\n")
+        em.processString("ls")
+        assertEquals(3, em.getCursorRow())
+
+        // `clear` emits ESC[H before ESC[2J/ESC[3J — ESC[H homes the cursor.
+        em.processString(ESC + "[H" + ESC + "[2J")
+        assertEquals(0, em.getCursorRow())
+        assertEquals(0, em.getCursorCol())
+
+        em.processString(ESC + "[H" + ESC + "[3J")
+        assertEquals(0, em.getCursorRow())
+        assertEquals(0, em.getCursorCol())
+    }
+
+    @Test
+    fun `bare ESC 2J erases the screen without homing the cursor`() {
+        val em = fresh()
+        for (i in 0 until 3) em.processString("line$i\r\n")
+        em.processString("ls")
+        assertEquals(3, em.getCursorRow())
+
+        // ESC[2J alone never moves the cursor in a real terminal; programs
+        // that want the cursor home send ESC[H first.
+        em.processString(ESC + "[2J")
+        assertEquals(3, em.getCursorRow())
+        assertEquals(2, em.getCursorCol())
+        for (row in 0 until em.getRows()) {
+            assertEquals("", rowText(em, row).trimEnd())
+        }
     }
 }

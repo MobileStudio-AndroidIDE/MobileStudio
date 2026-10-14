@@ -91,6 +91,39 @@ class OpencodeConfig private constructor(val raw: JSONObject, val worktree: File
     }
 
     companion object {
+        /** App-private global config merged under any project config. */
+        fun globalConfigFile(context: Context): File =
+            File(File(context.filesDir, "opencode/config").apply { mkdirs() }, "opencode.json")
+
+        /** Adds or replaces a local MCP server in the global config. */
+        @Synchronized
+        fun upsertMcpServer(context: Context, name: String, command: List<String>, enabled: Boolean = true) {
+            val file = globalConfigFile(context)
+            val root = if (file.isFile) parse(file.readText()) ?: JSONObject() else JSONObject()
+            val mcp = root.optJSONObject("mcp") ?: JSONObject().also { root.put("mcp", it) }
+            mcp.put(
+                name,
+                JSONObject().apply {
+                    put("type", "local")
+                    put("command", JSONArray(command))
+                    put("enabled", enabled)
+                },
+            )
+            file.writeText(root.toString(2))
+        }
+
+        @Synchronized
+        fun removeMcpServer(context: Context, name: String): Boolean {
+            val file = globalConfigFile(context)
+            if (!file.isFile) return false
+            val root = parse(file.readText()) ?: return false
+            val mcp = root.optJSONObject("mcp") ?: return false
+            if (!mcp.has(name)) return false
+            mcp.remove(name)
+            file.writeText(root.toString(2))
+            return true
+        }
+
         @Synchronized
         fun load(context: Context, worktree: File?): OpencodeConfig {
             val root = worktree ?: File(context.filesDir, "workspace").apply { mkdirs() }

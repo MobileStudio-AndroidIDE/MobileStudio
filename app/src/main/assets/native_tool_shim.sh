@@ -29,10 +29,17 @@ LINKER64="${MOBILESTUDIO_LINKER64:-/system/bin/linker64}"
 
 case "$tool" in
   */toolchain/sdk/*/cmake/*/bin/*)
+    # base = <filesDir>/toolchain ; files = <filesDir>
     base="${tool%%/sdk/*}"
+    files="${base%/*}"
     if [ -z "$PORTED_CMAKE" ]; then
-      for c in "$base/cmake/cmake-3.22/bin/cmake" \
-               "$base/cmake/3.22.1/bin/cmake"; do
+      # CmakeRuntimeManager installs <toolchain>/cmake/<version>/bin/cmake;
+      # Arm64ToolsDownloader uses <toolchain>/arm64-tools/cmake-arm64/bin/cmake.
+      for c in "$files/tools/cmake/bin/cmake" \
+               "$base"/cmake/*/bin/cmake \
+               "$base/cmake/cmake-3.22/bin/cmake" \
+               "$base/arm64-tools/cmake-arm64/bin/cmake" \
+               "$base"/arm64-tools/*/bin/cmake; do
         if [ -x "$c" ]; then
           PORTED_CMAKE="$c"
           break
@@ -40,10 +47,21 @@ case "$tool" in
       done
     fi
     if [ -z "$PORTED_NINJA" ]; then
-      n="$base/arm64-tools/cmake-arm64/bin/ninja"
-      if [ -x "$n" ]; then
-        PORTED_NINJA="$n"
-      fi
+      # Canonical candidates, most-preferred first:
+      #   <filesDir>/tools/ninja/bin/ninja         StudioShellTools arm64 (known-good)
+      #   <toolchain>/cmake/<ver>/bin/ninja        CmakeRuntimeManager (reinstall-safe)
+      #   <toolchain>/arm64-tools/**/bin/ninja     Arm64ToolsDownloader
+      # The SDK cmake tree ships a LINUX x86-64 ninja that Android cannot exec
+      # (ld-linux-x86-64.so.2); redirecting it is mandatory.
+      for n in "$files/tools/ninja/bin/ninja" \
+               "$base"/cmake/*/bin/ninja \
+               "$base/arm64-tools/cmake-arm64/bin/ninja" \
+               "$base"/arm64-tools/*/bin/ninja; do
+        if [ -x "$n" ]; then
+          PORTED_NINJA="$n"
+          break
+        fi
+      done
     fi
     ;;
 esac
@@ -88,6 +106,19 @@ if [ -z "$redirected" ]; then
 fi
 
 echo "[MobileStudio] native tool redirect: $tool -> $redirected" >&2
+
+# Expose the redirected tool's own lib/ (e.g. libc++_shared.so next to a ported
+# ninja) before exec'ing it through the linker.
+redirbase="${redirected%/bin/*}"
+if [ "$redirbase" != "$redirected" ] && [ -d "$redirbase/lib" ]; then
+  LD_LIBRARY_PATH="$redirbase/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
+# Ported cmake/ninja link against libc++_shared.so from the toolchain LLVM tree.
+if [ -d "$base/llvm/lib" ]; then
+  LD_LIBRARY_PATH="$base/llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
 
 case "$redirected" in
   */bin/cmake)

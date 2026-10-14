@@ -1,33 +1,62 @@
 # proguard-rules.pro
 #
-# MobileStudio ProGuard 규칙
+# MobileStudio ProGuard / R8 rules.
 #
-# JNI 메서드는 ProGuard 로 난독화하면 안 됨
-# → NativeBridge 의 모든 native 메서드 보존
+# NOTE: release minification is currently DISABLED in app/build.gradle.kts
+# (isMinifyEnabled = false) because the app drives Gradle/AGP through reflection
+# (AndroidGradleCachePatcher, GradleToolingConnector, extension loading). These
+# rules are correct and ready, but MUST be validated on-device before enabling
+# minification (set isMinifyEnabled/isShrinkResources = true and run a native +
+# extension install end-to-end).
+#
+# Package = com.aide.mobilestudio (the old com.example.mobilestudio rules matched
+# nothing and silently left every JNI entry point unprotected).
 
-# NativeBridge JNI 클래스 완전 보존
--keep class com.example.mobilestudio.NativeBridge {
-    *;
-}
+# ---- JNI entry points (external fun / System.loadLibrary) ----
+-keep class com.aide.mobilestudio.NativeBridge { *; }
+-keep class com.aide.mobilestudio.NativeExec { *; }
+-keep class com.aide.mobilestudio.ForkLoader { *; }
+-keep class com.aide.mobilestudio.LuaNativeBridge { *; }
+-keep class com.aide.mobilestudio.terminal.NativePty { *; }
+-keep class com.aide.mobilestudio.ai.api.LlamaRuntimeBridge { *; }
+-keep class com.aide.mobilestudio.ai.api.LlamaAndroid { *; }
 
-# native 메서드가 있는 클래스 전부 보존
+# JNI callback types referenced from C++ via FindClass().
+-keep class com.aide.mobilestudio.ai.api.LlamaRuntimeBridge$ModelStats { *; }
+-keep class com.aide.mobilestudio.ai.api.LlamaAndroid$ModelStats { *; }
+
+# Every class holding a native method must keep those members.
 -keepclasseswithmembernames class * {
     native <methods>;
 }
 
-# Kotlin object (싱글턴) 보존
--keep class com.example.mobilestudio.StorageHelper { *; }
-
-# LineLevel enum 보존
--keepclassmembers enum com.example.mobilestudio.LineLevel {
+# ---- Singletons / enums referenced by name ----
+-keep class com.aide.mobilestudio.StorageHelper { *; }
+-keepclassmembers enum com.aide.mobilestudio.LineLevel {
     public static **[] values();
     public static ** valueOf(java.lang.String);
 }
 
-# XZ 라이브러리 보존
+# ---- Extension platform (loaded reflectively at runtime) ----
+-keep class com.aide.mobilestudio.extension.** { *; }
+-keep interface com.aide.mobilestudio.extension.** { *; }
+
+# ---- Gson model classes (field names are serialized) ----
+-keep class com.aide.mobilestudio.extension.ExtensionManifest { *; }
+-keep class com.aide.mobilestudio.extension.ExtensionManager$RepoEntry { *; }
+-keepclassmembers,allowobfuscation class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+
+# ---- Bundled interpreters (reflection-heavy) ----
+-keep class org.luaj.** { *; }
+-keep class org.mozilla.javascript.** { *; }
 -keep class org.tukaani.xz.** { *; }
 
-# Kotlin 코루틴
+# ---- Kotlin coroutines ----
 -keepclassmembernames class kotlinx.** {
     volatile <fields>;
 }
+
+# ---- Kotlin metadata (reflection) ----
+-keep class kotlin.Metadata { *; }
