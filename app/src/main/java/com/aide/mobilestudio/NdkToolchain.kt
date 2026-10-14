@@ -88,6 +88,32 @@ object NdkToolchain {
     fun findInstalledArm64Ndk(context: Context): File? =
         BuildToolchain.ndkDirs(context).firstOrNull { isArm64NdkDir(it) }
 
+    /**
+     * Explains what the NDK scan actually found, for the build log.
+     *
+     * An NDK that hosts x86_64 tools cannot run on an arm64 phone, so it is
+     * correctly treated as "not installed" - but from the user's side that
+     * looks exactly like the app ignoring an NDK it already has. These lines
+     * make the decision readable instead of mysterious.
+     */
+    fun describeInstalled(context: Context): List<String> {
+        val dirs = BuildToolchain.ndkDirs(context).distinctBy { it.absolutePath }
+        if (dirs.isEmpty()) {
+            return listOf("> [Provision] NDK: none found on disk; downloading the Android ARM64 build")
+        }
+        val lines = mutableListOf("> [Provision] NDK: found ${dirs.size} on disk, none usable for on-device builds")
+        for (dir in dirs) {
+            lines += if (isArm64NdkDir(dir)) {
+                "> [Provision]   ${versionOf(dir) ?: dir.name}: usable"
+            } else {
+                // The stock NDK ships prebuilt/linux-x86_64, an x86_64 ELF that
+                // cannot execute on this device.
+                "> [Provision]   ${versionOf(dir) ?: dir.name}: x86_64 host tools (cannot run on this device)"
+            }
+        }
+        return lines
+    }
+
     /** Revision of an installed NDK dir: source.properties first, then the dir name. */
     fun versionOf(ndkDir: File): String? {
         runCatching {

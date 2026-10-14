@@ -101,6 +101,9 @@ object GlibcDownloader {
                     var stripPrefix: String? = null
                     while (true) {
                         val entry = tar.nextTarEntry ?: break
+                        // Checked per entry so a cancel stops extraction
+                        // between files rather than after the whole archive.
+                        BuildCancellation.throwIfCancelled()
                         if (stripPrefix == null) {
                             stripPrefix = if (entry.name.contains('/')) entry.name.substringBefore('/') + "/" else ""
                         }
@@ -181,6 +184,12 @@ object GlibcDownloader {
                 java.io.FileOutputStream(dest).use { output ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
+                        if (BuildCancellation.isCancelled) {
+                            // Drop the partial archive: a half-written file
+                            // would be mistaken for a finished download later.
+                            output.flush()
+                            throw ProvisioningCancelled()
+                        }
                         val read = input.read(buf)
                         if (read < 0) break
                         output.write(buf, 0, read)
@@ -191,6 +200,9 @@ object GlibcDownloader {
                     }
                 }
             }
+        } catch (e: ProvisioningCancelled) {
+            dest.delete()
+            throw e
         } finally {
             conn.disconnect()
         }
@@ -205,6 +217,9 @@ object GlibcDownloader {
                     var stripPrefix: String? = null
                     while (true) {
                         val entry = tar.nextTarEntry ?: break
+                        // Checked per entry so a cancel stops extraction
+                        // between files rather than after the whole archive.
+                        BuildCancellation.throwIfCancelled()
                         if (stripPrefix == null) {
                             stripPrefix = if (entry.name.contains('/')) entry.name.substringBefore('/') + "/" else ""
                         }
@@ -243,6 +258,9 @@ object GlibcDownloader {
                     var stripPrefix: String? = null
                     while (true) {
                         val entry = tar.nextTarEntry ?: break
+                        // Checked per entry so a cancel stops extraction
+                        // between files rather than after the whole archive.
+                        BuildCancellation.throwIfCancelled()
                         if (stripPrefix == null) {
                             stripPrefix = if (entry.name.contains('/')) entry.name.substringBefore('/') + "/" else ""
                         }

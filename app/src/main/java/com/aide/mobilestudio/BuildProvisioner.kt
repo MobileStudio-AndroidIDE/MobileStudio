@@ -27,6 +27,12 @@ object BuildProvisioner {
     private const val TAG = "BuildProvisioner"
     private const val GRADLE_INSTALL_TIMEOUT_MINUTES = 15L
 
+    /**
+     * Returned when the user pressed stop during provisioning. It is not a
+     * failure, so the wording avoids blaming the build.
+     */
+    const val CANCELLED_MESSAGE = "Build stopped before Gradle started (tool download cancelled)"
+
     // ------------------------------------------------------------------
     // Pure decision logic (unit-tested in BuildProvisionerTest)
     // ------------------------------------------------------------------
@@ -123,39 +129,51 @@ object BuildProvisioner {
         installer: JreGradleInstaller,
         emit: (String, LineLevel) -> Unit
     ): String? {
-        // 1) JDK — the user asked: "if neither JDK 17 nor 21 (arm64) exists, download".
-        if (hasUsableJdk(context, installer)) {
-            emit("> [Provision] JDK: already installed (skip)", LineLevel.INFO)
-        } else if (!ensureJdk(context, projectDir, emit)) {
-            return "JDK 17/21 is not installed and automatic download failed. " +
-                "Install a JDK from Tools > Toolchain Manager and build again."
-        }
+        // Every build starts a fresh provisioning run; the stop button calls
+        // BuildCancellation.cancel() and the steps below abort at their next
+        // chunk instead of downloading the rest of a gigabyte.
+        BuildCancellation.begin()
 
-        // 2) Gradle launcher — hard requirement. JreGradleInstaller skips the
-        //    download when any Gradle version is already installed, so this is
-        //    strictly "download when missing".
-        if (installer.isGradleInstalled) {
-            emit("> [Provision] Gradle: already installed (skip)", LineLevel.INFO)
-        } else if (!ensureGradle(installer, emit)) {
-            return "Gradle is not installed and automatic download failed. " +
-                "Check the network, or install Gradle from Tools > Toolchain Manager."
-        }
-
-        // 3) aapt2 override — needed by every Android APK build. Marker-guarded
-        //    inside ToolchainManager (no re-download when present).
-        runCatching { ToolchainManager(context).ensureAssetOverridesInstalled() }
-            .onFailure {
-                emit("> [Provision] WARN: aapt2 override check failed: ${it.message}", LineLevel.WARNING)
+        try {
+            // 1) JDK — the user asked: "if neither JDK 17 nor 21 (arm64) exists, download".
+            if (hasUsableJdk(context, installer)) {
+                emit("> [Provision] JDK: already installed (skip)", LineLevel.INFO)
+            } else if (!ensureJdk(context, projectDir, emit)) {
+                if (BuildCancellation.isCancelled) return CANCELLED_MESSAGE
+                return "JDK 17/21 is not installed and automatic download failed. " +
+                    "Install a JDK from Tools > Toolchain Manager and build again."
             }
 
-        // 4) Native tooling — never touch the network for projects that do
-        //    not build native code.
-        if (!needsNativeTooling(projectDir)) {
-            emit("> [Provision] native tooling: not needed for this project (skip)", LineLevel.DEBUG)
-            return null
+            // 2) Gradle launcher — hard requirement. JreGradleInstaller skips the
+            //    download when any Gradle version is already installed, so this is
+            //    strictly "download when missing".
+            if (installer.isGradleInstalled) {
+                emit("> [Provision] Gradle: already installed (skip)", LineLevel.INFO)
+            } else if (!ensureGradle(installer, emit)) {
+                if (BuildCancellation.isCancelled) return CANCELLED_MESSAGE
+                return "Gradle is not installed and automatic download failed. " +
+                    "Check the network, or install Gradle from Tools > Toolchain Manager."
+            }
+
+            // 3) aapt2 override — needed by every Android APK build. Marker-guarded
+            //    inside ToolchainManager (no re-download when present).
+            runCatching { ToolchainManager(context).ensureAssetOverridesInstalled() }
+                .onFailure {
+                    emit("> [Provision] WARN: aapt2 override check failed: ${it.message}", LineLevel.WARNING)
+                }
+
+            // 4) Native tooling — never touch the network for projects that do
+            //    not build native code.
+            if (!needsNativeTooling(projectDir)) {
+                emit("> [Provision] native tooling: not needed for this project (skip)", LineLevel.DEBUG)
+                return null
+            }
+            ensureNativeTooling(context, emit)
+            return if (BuildCancellation.isCancelled) CANCELLED_MESSAGE else null
+        } catch (e: ProvisioningCancelled) {
+            emit("> [Provision] stopped before Gradle started", LineLevel.WARNING)
+            return CANCELLED_MESSAGE
         }
-        ensureNativeTooling(context, emit)
-        return null
     }
 
     private fun hasUsableJdk(context: Context, installer: JreGradleInstaller): Boolean =
@@ -174,6 +192,7 @@ object BuildProvisioner {
             listOf(21, 17)
         }
         for (major in order) {
+            BuildCancellation.throwIfCancelled()
             val version = "jdk-$major"
             val dir = File(toolchain.kindDir(ToolchainManager.Kind.JDK), version)
             if (JdkDownloader.isValidJdk(dir, major)) {
@@ -244,12 +263,21 @@ object BuildProvisioner {
         val existingNdk = NdkToolchain.findInstalledArm64Ndk(context)
         if (existingNdk != null) {
             val installed = NdkToolchain.versionOf(existingNdk)
-            emit("> [Provision] NDK ${installed ?: existingNdk.name}: already installed (skip)", LineLevel.INFO)
+            emit(
+                "> [Provision] NDK ${installed ?: existingNdk.name}: already installed (skip)",
+                LineLevel.INFO,
+            )
             // Make sure Gradle resolves ndk.dir to the copy we actually have.
             if (installed != null) {
                 runCatching { toolchain.setActiveVersion(ToolchainManager.Kind.NDK, installed) }
             }
         } else {
+            // Say WHY a download is happening. Finding an NDK that cannot run
+            // on this device looks identical to "no NDK" from the outside, and
+            // without this line the user sees a download they already paid for
+            // once and reasonably calls it a bug.
+            NdkToolchain.describeInstalled(context).forEach { emit(it, LineLevel.INFO) }
+
             val version = newestSupportedNdk(
                 ToolchainManager.AVAILABLE_NDK,
                 NdkToolchain.GITHUB_NDK_VERSIONS
@@ -257,9 +285,13 @@ object BuildProvisioner {
             if (version == null) {
                 emit("> [Provision] WARN: no downloadable NDK version available", LineLevel.WARNING)
             } else {
-                emit("> [Provision] NDK $version: downloading (Android ARM64, may take a while)...", LineLevel.INFO)
+                emit(
+                    "> [Provision] NDK $version: downloading the Android ARM64 build (may take a while)...",
+                    LineLevel.INFO,
+                )
                 runCatching {
                     val installedDir = NdkToolchain.installFromGithub(context, version) { msg ->
+                        BuildCancellation.throwIfCancelled()
                         emit("> [Provision] NDK: $msg", LineLevel.INFO)
                     }
                     // installFromGithub may reuse a different revision already on
@@ -268,10 +300,15 @@ object BuildProvisioner {
                     runCatching { toolchain.setActiveVersion(ToolchainManager.Kind.NDK, actual) }
                     emit("> [Provision] NDK $actual ready", LineLevel.SUCCESS)
                 }.onFailure {
-                    emit("> [Provision] WARN: NDK $version install failed: ${it.message}", LineLevel.WARNING)
+                    if (BuildCancellation.isCancellation(it)) {
+                        emit("> [Provision] NDK download cancelled", LineLevel.WARNING)
+                    } else {
+                        emit("> [Provision] WARN: NDK $version install failed: ${it.message}", LineLevel.WARNING)
+                    }
                 }
             }
         }
+        BuildCancellation.throwIfCancelled()
 
         // --- CMake runtime (marker + ELF probe = skip; never re-downloads) ---
         runCatching {
@@ -290,6 +327,7 @@ object BuildProvisioner {
                 cmake.ensureInstalledBlocking(
                     onLog = { emit(it, LineLevel.INFO) },
                     onProgress = { read, total ->
+                        BuildCancellation.throwIfCancelled()
                         val mb = read / (1024L * 1024L)
                         if (mb > 0 && mb % 4 == 0L) {
                             emit(
@@ -305,7 +343,11 @@ object BuildProvisioner {
                 emit("> [Provision] CMake ${CmakeRuntimeManager.CMAKE_VERSION} ready", LineLevel.SUCCESS)
             }
         }.onFailure {
-            emit("> [Provision] WARN: CMake install failed: ${it.message}", LineLevel.WARNING)
+            if (BuildCancellation.isCancellation(it)) {
+                emit("> [Provision] CMake download cancelled", LineLevel.WARNING)
+            } else {
+                emit("> [Provision] WARN: CMake install failed: ${it.message}", LineLevel.WARNING)
+            }
         }
 
         // --- Ninja (self-heal inside the installed CMake; only downloads when
@@ -323,11 +365,16 @@ object BuildProvisioner {
             emit("> [Provision] Android LLVM (Clang): downloading (~1100MB, one-time)...", LineLevel.INFO)
             runCatching {
                 AndroidHostedLlvmInstaller.ensureInstalled(context, emptyList()) { line, level ->
+                    BuildCancellation.throwIfCancelled()
                     emit(line, level)
                 }
                 emit("> [Provision] Android LLVM ready", LineLevel.SUCCESS)
             }.onFailure {
-                emit("> [Provision] WARN: Android LLVM install failed: ${it.message}", LineLevel.WARNING)
+                if (BuildCancellation.isCancellation(it)) {
+                    emit("> [Provision] Android LLVM download cancelled", LineLevel.WARNING)
+                } else {
+                    emit("> [Provision] WARN: Android LLVM install failed: ${it.message}", LineLevel.WARNING)
+                }
             }
         }
     }

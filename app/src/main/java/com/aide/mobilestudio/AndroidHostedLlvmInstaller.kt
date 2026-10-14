@@ -396,8 +396,39 @@ object AndroidHostedLlvmInstaller {
             add(File(context.filesDir, "toolchain/android-llvm"))
             add(File(context.filesDir, "toolchain/ndk-host"))
             add(File(context.filesDir, "usr"))
+            // An installed NDK ships its own clang under
+            // toolchains/llvm/prebuilt/<host>/bin, which compilerDirIfUsable
+            // already understands. Without these roots the probe could not see
+            // an NDK that was right there on disk, concluded "no compiler" and
+            // downloaded a second ~1100MB toolchain on every native build.
+            ndkSearchRoots(context.filesDir).forEach { add(it) }
         }.map { runCatching { it.canonicalFile }.getOrDefault(it) }
             .distinctBy { it.absolutePath }
+    }
+
+    /**
+     * Every directory under the app's files dir that may hold an NDK, i.e. the
+     * two layouts the app installs into:
+     *
+     *  - `toolchain/ndk/<name>` — the Android ARM64 builds fetched from GitHub
+     *  - `toolchain/sdk/<name>/ndk/<version>` — SDK-installed NDKs
+     *
+     * Kept separate from [searchRoots] (and taking a [File] rather than a
+     * [Context]) so the layout is covered by host tests. [compilerDirIfUsable]
+     * then walks into the `toolchains/llvm/prebuilt/<host>` tree these contain
+     * and rejects desktop-hosted toolchains, which cannot execute on-device.
+     */
+    internal fun ndkSearchRoots(filesDir: File): List<File> {
+        val roots = mutableListOf<File>()
+        File(filesDir, "toolchain/ndk").listFiles()
+            ?.filter { it.isDirectory }
+            ?.forEach { roots += it }
+        File(filesDir, "toolchain/sdk").listFiles()
+            ?.filter { it.isDirectory }
+            ?.forEach { sdk -> File(sdk, "ndk").listFiles()
+                ?.filter { it.isDirectory }
+                ?.forEach { roots += it } }
+        return roots
     }
 
     private fun download(urlText: String, output: File, onLine: (String, LineLevel) -> Unit) {
@@ -514,7 +545,8 @@ object AndroidHostedLlvmInstaller {
         error("Downloaded Android LLVM archive does not contain clang/clang++.")
     }
 
-    private fun compilerDirIfUsable(root: File): File? {
+    /** File-level hook for host tests. */
+    internal fun compilerDirIfUsable(root: File): File? {
         if (!root.isDirectory) return null
         fun usable(dir: File): Boolean {
             val clang = File(dir, "bin/clang")

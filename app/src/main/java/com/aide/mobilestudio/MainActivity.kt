@@ -183,6 +183,9 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     private var gradleSyncNeeded = false
     private var gradleSyncRunning = false
     private var bottomPanelExpandedHeight = 0
+
+    /** Remembered width of the panel when it is docked beside the editor (landscape). */
+    private var bottomPanelExpandedWidth = 0
     private var bottomPanelHeightAnimator: ValueAnimator? = null
     private var currentBottomPanelTab = "build"
 
@@ -1608,6 +1611,10 @@ Long press: Toggle Shell panel"""
     }
 
     private fun stopBuild() {
+        // Abort any tool download first: provisioning can be pulling gigabytes
+        // before Gradle even starts, and that is what a user watching a long
+        // "Downloading NDK..." line actually wants gone.
+        BuildCancellation.cancel()
         gradleRunner.cancel()
         buildScheduler.cancelAndClear()
         setBuildRunning(false)
@@ -4788,20 +4795,37 @@ Long press: Toggle Shell panel"""
         }
         syncBottomPanelToggleRotation(expanded = false, animate = false)
 
-        // Drag resize
+        // Drag resize. The panel sits below the editor in portrait and beside
+        // it in landscape, so the handle adjusts its height or its width. The
+        // direction is read from the panel's own layout params rather than the
+        // current orientation, so it stays correct across a rotation without
+        // having to re-install the listener.
         val divider = findViewById<View>(R.id.panel_divider)
-        var startY = 0f;
-        var startH = 0
+        var startY = 0f
+        var startX = 0f
+        var startSize = 0
         divider.setOnTouchListener { _, event ->
+            val panelParams = bottomPanel.layoutParams as? LinearLayout.LayoutParams
+            val resizeHorizontally = panelParams != null && panelParams.width > 0
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    startY = event.rawY; startH = bottomPanel.height
+                    startY = event.rawY
+                    startX = event.rawX
+                    startSize = if (resizeHorizontally) bottomPanel.width else bottomPanel.height
                 }
 
                 MotionEvent.ACTION_MOVE -> {
-                    val delta = (startY - event.rawY).toInt()
-                    bottomPanel.layoutParams.height = (startH + delta).coerceIn(100, 1400)
-                    bottomPanelExpandedHeight = bottomPanel.layoutParams.height
+                    if (resizeHorizontally) {
+                        // Dragging the divider to the left widens the panel.
+                        val width = (startSize - (event.rawX - startX).toInt())
+                            .coerceIn(dp(220), dp(560))
+                        panelParams?.width = width
+                        bottomPanelExpandedWidth = width
+                    } else {
+                        val height = (startSize - (event.rawY - startY).toInt()).coerceIn(100, 1400)
+                        bottomPanel.layoutParams.height = height
+                        bottomPanelExpandedHeight = height
+                    }
                     bottomPanel.requestLayout()
                 }
             }
@@ -8569,7 +8593,16 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
 
     internal fun showBottomPanel() {
         bottomPanel.animate().cancel()
-        val targetHeight = currentBottomPanelTargetHeight()
+        // Docked beside the editor (landscape) it grows by width; the layout
+        // params still carry the docked width while it is hidden, which is
+        // what restores it after a hide.
+        val targetHeight = if (isBottomPanelSideDocked()) {
+            bottomPanelExpandedWidth.takeIf { it > 0 }
+                ?: (bottomPanel.layoutParams as? LinearLayout.LayoutParams)?.width
+                ?: 0
+        } else {
+            currentBottomPanelTargetHeight()
+        }
         if (bottomPanel.visibility == View.VISIBLE && bottomPanel.height > 0) {
             syncBottomPanelToggleRotation(expanded = true)
             return
@@ -8577,9 +8610,12 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         bottomPanel.visibility = View.VISIBLE
         bottomPanel.alpha = 0f
         bottomPanel.translationY = StudioUi.dp(this, 12).toFloat()
-        bottomPanel.layoutParams = bottomPanel.layoutParams.apply { height = 0 }
+        // Reset along the axis the panel grows on: height when docked below,
+        // width when docked beside the editor in landscape.
+        setBottomPanelSize(0)
         animateBottomPanelHeight(0, targetHeight) {
-            bottomPanelExpandedHeight = targetHeight
+            if (isBottomPanelSideDocked()) bottomPanelExpandedWidth = targetHeight
+            else bottomPanelExpandedHeight = targetHeight
         }
         bottomPanel.animate()
             .alpha(1f)
@@ -8629,14 +8665,21 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             syncBottomPanelToggleRotation(expanded = false)
             return
         }
-        val startHeight = bottomPanel.height
+        // Read the current size along whichever axis the panel is docked on,
+        // so hiding works the same below and beside the editor.
+        val startSize = bottomPanelSize()
             .takeIf { it > 0 }
-            ?: bottomPanel.layoutParams.height.takeIf { it > 0 }
+            ?: bottomPanel.layoutParams.let { if (isBottomPanelSideDocked()) it.width else it.height }
+                .takeIf { it > 0 }
             ?: currentBottomPanelTargetHeight()
-        bottomPanelExpandedHeight = startHeight
-        animateBottomPanelHeight(startHeight, 0) {
+        if (isBottomPanelSideDocked()) {
+            bottomPanelExpandedWidth = startSize
+        } else {
+            bottomPanelExpandedHeight = startSize
+        }
+        animateBottomPanelHeight(startSize, 0) {
             bottomPanel.visibility = View.GONE
-            bottomPanel.layoutParams = bottomPanel.layoutParams.apply { height = bottomPanelExpandedHeight }
+            setBottomPanelSize(if (isBottomPanelSideDocked()) 0 else bottomPanelExpandedHeight)
         }
         syncBottomPanelToggleRotation(expanded = false)
         updateDrawerLockState()
@@ -8767,15 +8810,32 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             ?: 780.dp()
     }
 
+    /**
+     * True when the build-output panel is docked beside the editor rather than
+     * under it, which is what the landscape layout does. Read from the panel's
+     * own layout params so it stays right after a rotation without re-installing
+     * any listener.
+     */
+    private fun isBottomPanelSideDocked(): Boolean =
+        (bottomPanel.layoutParams as? LinearLayout.LayoutParams)?.let { it.width > 0 } == true
+
+    /** The dimension the panel is resized along: height below, width beside. */
+    private fun bottomPanelSize(): Int =
+        if (isBottomPanelSideDocked()) bottomPanel.width else bottomPanel.height
+
+    private fun setBottomPanelSize(value: Int) {
+        bottomPanel.layoutParams = bottomPanel.layoutParams.apply {
+            if (isBottomPanelSideDocked()) width = value else height = value
+        }
+    }
+
     private fun animateBottomPanelHeight(start: Int, end: Int, onEnd: (() -> Unit)? = null) {
         bottomPanelHeightAnimator?.cancel()
         bottomPanelHeightAnimator = ValueAnimator.ofInt(start, end).apply {
             duration = StudioUi.AnimNormal
             interpolator = StudioUi.DefaultInterpolator
             addUpdateListener { animator ->
-                bottomPanel.layoutParams = bottomPanel.layoutParams.apply {
-                    height = animator.animatedValue as Int
-                }
+                setBottomPanelSize(animator.animatedValue as Int)
             }
             addListener(
                 object : android.animation.AnimatorListenerAdapter() {

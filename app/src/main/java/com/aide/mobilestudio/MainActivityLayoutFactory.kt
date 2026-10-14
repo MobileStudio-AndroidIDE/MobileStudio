@@ -523,9 +523,16 @@ private fun Context.buildTabStrip(): View {
 }
 
 private fun Context.buildWorkspaceArea(): View {
-    return LinearLayout(this).apply {
+    // The banner, welcome screen and editor form one stack in both
+    // orientations; only what happens to the build-output panel differs.
+    val editorStack = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setBackgroundColor(c(StudioUi.Ink))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            1f,
+        )
         addView(LinearLayout(this@buildWorkspaceArea).apply {
             id = R.id.banner_container
             orientation = LinearLayout.VERTICAL
@@ -533,12 +540,45 @@ private fun Context.buildWorkspaceArea(): View {
         })
         addView(buildWelcomeScreen())
         addView(buildEditorContainer())
+    }
+
+    if (!isLandscapeScreen()) {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(c(StudioUi.Ink))
+            addView(editorStack)
+            addView(View(this@buildWorkspaceArea).apply {
+                id = R.id.panel_divider
+                setBackgroundColor(c(StudioUi.Divider))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+            addView(buildBottomPanel())
+        }
+    }
+
+    // Landscape: the build-output panel moves beside the editor. A phone in
+    // landscape has only ~360dp of height, and a panel across the bottom eats
+    // a third of it; there is plenty of width instead. The divider stays the
+    // same view, so MainActivity's drag-to-resize keeps working - it adjusts
+    // width here and height in portrait.
+    return LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        setBackgroundColor(c(StudioUi.Ink))
+        addView(editorStack)
         addView(View(this@buildWorkspaceArea).apply {
             id = R.id.panel_divider
             setBackgroundColor(c(StudioUi.Divider))
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
-        addView(buildBottomPanel())
+        }, LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
+        addView(buildBottomPanel(), LinearLayout.LayoutParams(
+            landscapePanelWidth(),
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
     }
+}
+
+/** Share of the screen width the build-output panel takes in landscape. */
+private fun Context.landscapePanelWidth(): Int {
+    val widthDp = resources.displayMetrics.widthPixels / resources.displayMetrics.density
+    return (widthDp * 0.34f).toInt().coerceIn(dp(280), dp(440))
 }
 
 private fun Context.buildWelcomeScreen(): View {
