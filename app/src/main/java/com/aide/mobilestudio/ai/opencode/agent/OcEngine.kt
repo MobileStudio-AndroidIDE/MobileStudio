@@ -89,7 +89,18 @@ class OcEngine(private val context: Context) : EngineBridge {
     private var mcpReady = false
 
     var provider: AIProvider? = null
-    var modelRef: String? = null
+
+    // The last model you picked, restored on open. setModel() has always
+    // written a preference, but the workspace never read one back - and the
+    // key it wrote was shared with the bottom-panel agent, whose model ids do
+    // not mean the same thing. So the engine started with no model at all and
+    // currentModelRef() fell through to the config default, then to
+    // gemini-1.5-flash, then to whichever local model was listed first. That
+    // is why reopening the workspace landed on a different model every time
+    // and tapping into AI twice looked like it had swapped in a better one.
+    // A stale ref is not a problem: currentModelRef() only accepts it if the
+    // provider registry still knows that model.
+    var modelRef: String? = settings.lastWorkspaceModelId
     var agentName: String = agentRegistry.defaultAgent()
     var listener: Listener? = null
     val runtimeOptions = JSONObject().apply {
@@ -386,7 +397,7 @@ class OcEngine(private val context: Context) : EngineBridge {
 
     fun setModel(ref: String) {
         modelRef = ref
-        settings.lastModelId = ref
+        settings.lastWorkspaceModelId = ref
         provider = null
     }
 

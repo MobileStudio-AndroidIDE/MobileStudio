@@ -29,6 +29,19 @@ class AiSettings(private val context: Context) {
         get() = prefs.getString("last_model_id", "gemini")
         set(value) = prefs.edit().putString("last_model_id", value).apply()
 
+    /**
+     * The last model chosen in the AI workspace (OcEngine).
+     *
+     * It is a separate preference from [lastModelId] on purpose: that one
+     * belongs to the bottom-panel agent, and the two keep entirely different
+     * model lists whose ids do not mean the same thing. Sharing one key meant
+     * opening either screen silently overwrote the other's choice, which is
+     * how the workspace could reopen on a model you had not picked.
+     */
+    var lastWorkspaceModelId: String?
+        get() = prefs.getString("last_workspace_model_id", null)
+        set(value) = prefs.edit().putString("last_workspace_model_id", value).apply()
+
     var activeProvider: String
         get() = prefs.getString("active_provider", "gemini") ?: "gemini"
         set(value) = prefs.edit().putString("active_provider", value).apply()

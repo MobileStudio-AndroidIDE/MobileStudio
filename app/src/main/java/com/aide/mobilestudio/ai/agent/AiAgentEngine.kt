@@ -30,6 +30,10 @@ class AiAgentEngine(private val context: Context) {
     private var currentFileContext: String? = null
     private var lastProviderId: String? = null
 
+    // trimHistoryForRequest(): see the comment there for why these exist.
+    private val maxRequestChars = 60_000
+    private val minKeptMessages = 6
+
     var provider: AIProvider? = null
         set(value) {
             val oldId = field?.id
@@ -302,6 +306,35 @@ class AiAgentEngine(private val context: Context) {
         return sb.toString()
     }
 
+    /**
+     * Drops the oldest turns until the request is under a size budget.
+     *
+     * LocalLlamaProvider trims for itself, because a 4k-context model cannot
+     * hold a long session - but nothing on the remote path trimmed at all, so
+     * a conversation that had been open a while, or one carrying a large open
+     * file, came back as "Prompt exceeds context size" with no way out but
+     * starting a new conversation. The budget is deliberately well under a
+     * 64k-token window even when the text is Korean, which costs roughly a
+     * token per character.
+     *
+     * Whole oldest turns go first rather than text clipped inside them, so
+     * every turn that survives is intact - tool results included - and the
+     * request stays coherent after trimming. The current exchange is never
+     * the thing that gets dropped.
+     */
+    private fun trimHistoryForRequest(): JSONArray {
+        if (history.toString().length <= maxRequestChars) return history
+        val trimmed = JSONArray()
+        for (i in 0 until history.length()) trimmed.put(history.get(i))
+        while (trimmed.length() > minKeptMessages && trimmed.toString().length > maxRequestChars) {
+            trimmed.remove(0)
+        }
+        if (trimmed.length() < history.length()) {
+            Log.i("AiAgentEngine", "Trimmed request history ${history.length()} -> ${trimmed.length()} messages")
+        }
+        return trimmed
+    }
+
     private fun runAgentLoop() {
         if (history.length() == 1) {
             val systemPrompt = buildSystemPrompt()
@@ -359,7 +392,11 @@ class AiAgentEngine(private val context: Context) {
             val toolCalls = mutableListOf<AIProvider.StreamEvent.ToolCall>()
 
             try {
-                activeProvider.generateStream(history, ToolRegistry.getToolDefinitions(), runtimeOptions).collect { event ->
+                // Trimmed here rather than in each provider: the local one
+                // already did it for a 4k model, and the remote one did not do
+                // it at all, which is where "Prompt exceeds context size" came
+                // from. One rule for both, applied once, on the way out.
+                activeProvider.generateStream(trimHistoryForRequest(), ToolRegistry.getToolDefinitions(), runtimeOptions).collect { event ->
                     when (event) {
                         is AIProvider.StreamEvent.Text -> {
                             if (aiResponseText.isEmpty()) {
