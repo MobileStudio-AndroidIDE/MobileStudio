@@ -329,7 +329,7 @@ private fun Context.buildChrome(): View {
             setOnClickListener { (context as? MainActivity)?.openMainMenuFromToolbar() }
             StudioUi.touchLift(this)
             StudioUi.enforceMinTouchTarget(this)
-        }, LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.MATCH_PARENT))
+        }, LinearLayout.LayoutParams(dp(60), ViewGroup.LayoutParams.MATCH_PARENT))
 
         addView(topTab(R.id.tab_top_project, "프로젝트", "Project", selected = true))
         addView(topTab(R.id.tab_top_run, "실행", "Run"))
@@ -339,10 +339,11 @@ private fun Context.buildChrome(): View {
 
         addView(View(this@buildChrome), LinearLayout.LayoutParams(0, 1, 1f))
 
-        addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 34))
-
         // Run is the one thing that keeps its colour - it is the action the
-        // bar exists to offer.
+        // bar exists to offer. Sync is not here: on a 384dp phone this row
+        // already spends every pixel it has on the five tabs the design
+        // shows, and a sixth control pushed the run button clean off the
+        // right edge. It lives on the file tab row now, where there is room.
         addView(iconButton(R.id.btn_run, android.R.drawable.ic_media_play, StudioUi.ActiveGreen, "Build", 38))
 
         addView(ProgressBar(this@buildChrome).apply {
@@ -386,8 +387,11 @@ private fun Context.topTab(viewId: Int, label: String, labelEn: String, selected
                 radiusDp = StudioUi.RadiusMd,
             ),
         )
-        setPadding(dp(7), 0, dp(7), 0)
-        minimumWidth = dp(46)
+        setPadding(dp(4), 0, dp(4), 0)
+        // A 46dp floor per tab is a fifth of a 240dp-wide phone's bar across
+        // five tabs alone. 40dp is still a bigger target than the label it
+        // carries and it is what lets the whole row fit with the run button.
+        minimumWidth = dp(40)
         StudioUi.touchLift(this)
         StudioUi.enforceMinTouchTarget(this)
         layoutParams = LinearLayout.LayoutParams(
@@ -511,6 +515,9 @@ private fun Context.buildTabStrip(): View {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+            // Sync sits with file history rather than in the top bar - it has
+            // to be somewhere, and the top bar has no pixel left to spare.
+            addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 30))
             addView(iconButton(R.id.btn_back, android.R.drawable.ic_menu_revert, StudioUi.TextSoft, "Back", 30))
             addView(iconButton(R.id.btn_forward, android.R.drawable.ic_media_ff, StudioUi.TextSoft, "Forward", 30))
         })
