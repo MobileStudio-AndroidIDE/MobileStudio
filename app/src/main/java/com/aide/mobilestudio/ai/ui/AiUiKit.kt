@@ -11,6 +11,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.aide.mobilestudio.StudioUi
@@ -57,7 +59,7 @@ object AiUiKit {
             text = label
             gravity = Gravity.CENTER
             setTextColor(fg)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             setTypeface(null, Typeface.BOLD)
             background = rounded(bg, context.dp(sizeDp / 2))
             layoutParams = LinearLayout.LayoutParams(context.dp(sizeDp), context.dp(sizeDp))
@@ -67,7 +69,7 @@ object AiUiKit {
         TextView(context).apply {
             text = label
             setTextColor(fg)
-            textSize = 11f
+            textSize = StudioUi.TypeSmall
             setTypeface(null, Typeface.BOLD)
             background = rounded(bg, context.dp(999))
             setPadding(context.dp(10), context.dp(4), context.dp(10), context.dp(4))
@@ -80,6 +82,27 @@ object AiUiKit {
             setTextColor(StudioUi.palette.onAccent)
             background = rippleContent(context, StudioUi.palette.accent, context.dp(10))
             setOnClickListener(onClick)
+        }
+
+    /**
+     * An icon-only button with a real target behind it.
+     *
+     * Header and composer icons were bare ImageButtons with a null background:
+     * no press feedback at all, and a 24dp glyph is well under what a thumb is
+     * aiming at, so which part of the row was even pressable was anyone's
+     * guess. The ripple is kept at the icon's own size so it reads as a circle
+     * around the glyph rather than a slab across the row, while the touch floor
+     * grows the hit area around it.
+     */
+    fun iconButton(context: Context, resId: Int, tint: Int = StudioUi.palette.muted, onClick: (View) -> Unit): ImageButton =
+        ImageButton(context).apply {
+            setImageResource(resId)
+            scaleType = ImageView.ScaleType.CENTER
+            background = rippleContent(context, StudioUi.palette.surface2, context.dp(18))
+            setColorFilter(tint)
+            setPadding(context.dp(6), context.dp(6), context.dp(6), context.dp(6))
+            setOnClickListener(onClick)
+            StudioUi.enforceMinTouchTarget(this)
         }
 
     fun ghostButton(context: Context, label: String, onClick: (View) -> Unit): Button =
@@ -95,7 +118,7 @@ object AiUiKit {
         TextView(context).apply {
             text = label
             setTextColor(StudioUi.palette.textSoft)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             background = rippleContent(context, StudioUi.palette.surface2, context.dp(8))
             setPadding(context.dp(10), context.dp(5), context.dp(10), context.dp(5))
             setOnClickListener(onClick)
@@ -112,7 +135,7 @@ object AiUiKit {
         addView(TextView(context).apply {
             text = title.uppercase()
             setTextColor(StudioUi.palette.textSoft)
-            textSize = 11f
+            textSize = StudioUi.TypeSmall
             letterSpacing = 0.08f
             setTypeface(null, Typeface.BOLD)
         })
@@ -122,7 +145,7 @@ object AiUiKit {
         TextView(context).apply {
             this.text = text
             setTextColor(StudioUi.palette.textSoft)
-            textSize = 13f
+            textSize = StudioUi.TypeBody
             setLineSpacing(context.dp(3).toFloat(), 1.05f)
             setTextIsSelectable(selectable)
         }
@@ -140,7 +163,7 @@ object AiUiKit {
             addView(TextView(context).apply {
                 text = message
                 setTextColor(StudioUi.palette.muted)
-                textSize = 13f
+                textSize = StudioUi.TypeBody
                 gravity = Gravity.CENTER
                 setPadding(0, context.dp(10), 0, 0)
             })

@@ -57,6 +57,15 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
 
     private val outputContainer: LinearLayout
     private val scrollView: ScrollView
+    /**
+     * The blank conversation, shown until a real message lands.
+     *
+     * A bare scroll area under a working header reads as something having
+     * failed to load, and from inside the panel there was no way to find the
+     * quick actions, slash commands or @mentions. This says what it is waiting
+     * for and where the entry points are.
+     */
+    private var emptyConversation: View? = null
     private val approvalContainer: LinearLayout
     private val inputField: EditText
     private val sendButton: ImageButton
@@ -213,7 +222,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(StudioUi.palette.surface)
-            setPadding(dp(12), dp(4), dp(4), dp(4))
+            setPadding(dp(4), dp(2), dp(2), dp(2))
         }
 
         modelSelector = Spinner(context).apply {
@@ -243,20 +252,14 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             visibility = View.GONE
         }
 
-        val newConvBtn = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_add)
-            background = null
-            setOnClickListener { startNewConversation() }
+        val newConvBtn = AiUiKit.iconButton(context, android.R.drawable.ic_menu_add) {
+            startNewConversation()
         }
-        val historyBtn = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_recent_history)
-            background = null
-            setOnClickListener { showHistoryDialog() }
+        val historyBtn = AiUiKit.iconButton(context, android.R.drawable.ic_menu_recent_history) {
+            showHistoryDialog()
         }
-        val settingsBtn = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_preferences)
-            background = null
-            setOnClickListener { showSettingsDialog() }
+        val settingsBtn = AiUiKit.iconButton(context, android.R.drawable.ic_menu_preferences) {
+            showSettingsDialog()
         }
         headerRow.addView(modelSelector)
         headerRow.addView(runtimeSelector)
@@ -268,10 +271,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         // Local AI status row: 현재 로드된 모델 + backend/GPU layers (실측값만 표시)
         aiStatusText = TextView(context).apply {
             text = ""
-            setTextColor(Color.parseColor("#8B949E"))
-            textSize = 10f
+            setTextColor(StudioUi.palette.muted)
+            textSize = StudioUi.TypeCaption
             typeface = Typeface.MONOSPACE
-            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setPadding(dp(12), dp(3), dp(12), dp(3))
             visibility = GONE
             layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
@@ -296,10 +299,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         for ((label, prompt) in quickActions) {
             val btn = TextView(context).apply {
                 text = label
-                textSize = 10f
+                textSize = StudioUi.TypeSmall
                 setTextColor(StudioUi.palette.accent)
                 setPadding(dp(6), dp(3), dp(6), dp(3))
-                background = StudioUi.rounded(context, fill = "#21252B", radiusDp = 12)
+                background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 12)
                 layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
                     marginEnd = dp(4)
                 }
@@ -316,7 +319,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         // Plan Area
         planToggle = TextView(context).apply {
             this.text = "Show Plan ⌵"
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             setTextColor(StudioUi.palette.accent)
             setPadding(dp(12), dp(4), dp(12), dp(4))
             visibility = View.GONE
@@ -395,6 +398,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         }
         scrollView.addView(outputContainer)
         addView(scrollView)
+        emptyConversation = buildEmptyConversation().also { outputContainer.addView(it) }
 
         // Command output panel (10-line preview + Show more/less)
         commandOutputToggle = TextView(context).apply {
@@ -442,18 +446,18 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         val diffHeader = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(8), dp(4), dp(8), dp(4))
-            setBackgroundColor(Color.parseColor("#1E1E2E"))
+            setBackgroundColor(StudioUi.palette.surface2)
         }
         val diffTitle = TextView(context).apply {
             text = "Diffs"
-            setTextColor(Color.parseColor("#89B4FA"))
-            textSize = 12f
+            setTextColor(StudioUi.palette.accent)
+            textSize = StudioUi.TypeBody
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         val diffCloseBtn = TextView(context).apply {
             text = "X"
-            setTextColor(Color.parseColor("#F38BA8"))
-            textSize = 14f
+            setTextColor(StudioUi.palette.error)
+            textSize = StudioUi.TypeBody
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(8), 0, dp(8), 0)
             setOnClickListener { diffContainer.visibility = View.GONE }
@@ -463,8 +467,8 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         diffContainer.addView(diffHeader)
         val diffScroll = ScrollView(context).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(200)) }
         val diffText = TextView(context).apply {
-            setTextColor(Color.parseColor("#CDD6F4"))
-            textSize = 11f
+            setTextColor(StudioUi.palette.text)
+            textSize = StudioUi.TypeSmall
             typeface = Typeface.MONOSPACE
             setPadding(dp(8), dp(4), dp(8), dp(4))
             setTextIsSelectable(true)
@@ -476,7 +480,12 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         // Approval
         approvalContainer = LinearLayout(context).apply {
             orientation = VERTICAL
-            background = StudioUi.rounded(context, fill = "#1C212B", stroke = "#F05C5C", radiusDp = 8)
+            background = StudioUi.rounded(
+                context,
+                fill = StudioUi.palette.surface2,
+                stroke = StudioUi.palette.error,
+                radiusDp = 8,
+            )
             setPadding(dp(12), dp(12), dp(12), dp(12))
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                 setMargins(dp(12), dp(8), dp(12), dp(8))
@@ -488,10 +497,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         // Context badge: compact "what will be sent" line above the input
         // (open editor file · @mention count · rough token size).
         contextBadge = TextView(context).apply {
-            textSize = 10f
+            textSize = StudioUi.TypeCaption
             typeface = Typeface.MONOSPACE
             setTextColor(StudioUi.palette.muted)
-            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setPadding(dp(12), dp(3), dp(12), dp(3))
             visibility = GONE
         }
         addView(contextBadge)
@@ -504,12 +513,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             setBackgroundColor(StudioUi.palette.surface)
         }
         // Attach image button
-        attachButton = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_gallery)
-            background = null
+        attachButton = AiUiKit.iconButton(context, android.R.drawable.ic_menu_gallery) {
+            pickImage()
+        }.apply {
             setColorFilter(StudioUi.palette.muted)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            setOnClickListener { pickImage() }
             contentDescription = "Attach image"
         }
         inputField = EditText(context).apply {
@@ -544,14 +551,11 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 }
             })
         }
-        sendButton = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_menu_send)
-            background = null
+        sendButton = AiUiKit.iconButton(context, android.R.drawable.ic_menu_send) {
+            if (engineState == AiAgentEngine.AgentState.GENERATING) engine.stop()
+            else sendMessage()
+        }.apply {
             setColorFilter(StudioUi.palette.accent)
-            setOnClickListener {
-                if (engineState == AiAgentEngine.AgentState.GENERATING) engine.stop()
-                else sendMessage()
-            }
         }
         inputRow.addView(attachButton)
         inputRow.addView(inputField)
@@ -918,7 +922,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             if (text.isNotEmpty()) {
                 column.addView(TextView(context).apply {
                     this.text = text
-                    textSize = 15f
+                    textSize = StudioUi.TypeTitle
                     setTextColor(StudioUi.palette.text)
                     setPadding(0, dp(2), 0, dp(8))
                 })
@@ -951,7 +955,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                     if (desc.isNotEmpty()) {
                         column.addView(TextView(context).apply {
                             this.text = "    $desc"
-                            textSize = 12f
+                            textSize = StudioUi.TypeSmall
                             setTextColor(StudioUi.palette.muted)
                             setPadding(dp(36), 0, 0, dp(4))
                         })
@@ -985,7 +989,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                     if (desc.isNotEmpty()) {
                         optionsBox.addView(TextView(context).apply {
                             this.text = "    $desc"
-                            textSize = 12f
+                            textSize = StudioUi.TypeSmall
                             setTextColor(StudioUi.palette.muted)
                             setPadding(dp(36), 0, 0, dp(2))
                         })
@@ -1025,8 +1029,8 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 addView(TextView(context).apply { this.text = statusIcon; setPadding(0, 0, dp(8), 0) })
                 addView(TextView(context).apply {
                     this.text = text
-                    textSize = 12f
-                    setTextColor(Color.parseColor("#D1D5DB"))
+                    textSize = StudioUi.TypeSmall
+                    setTextColor(StudioUi.palette.text)
                 })
             })
         }
@@ -1166,7 +1170,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         val imageB64 = pendingImageBase64
         pendingImageBase64 = null
         pendingImagePreview?.visibility = View.GONE
-        attachButton.setColorFilter(Color.parseColor("#6B7280"))
+        attachButton.setColorFilter(StudioUi.palette.muted)
         val displayText = if (imageB64 != null) "$text\n[Image attached]" else text
         addMessage("user", displayText)
         // Clear previous command output
@@ -1236,7 +1240,11 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         thinkingLiveBuf.setLength(0)
         thinkingLiveDone = true
         updateTokenCount()
-        addMessage("system", "Started a new conversation.")
+        // The welcome takes the place of the old "Started a new conversation."
+        // line: it says the same thing while saying what to do next, and a
+        // transcript that opens with a message about itself is not a
+        // conversation yet.
+        showEmptyConversation()
     }
 
     private fun confirmClearConversation() {
@@ -1366,10 +1374,53 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
     }
 
     private fun addMessage(role: String, text: String) {
+        emptyConversation?.visibility = View.GONE
         val messageView = createMessageView(role, text)
         outputContainer.addView(messageView)
         scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
     }
+
+    /**
+     * Put the panel back to its opening state.
+     *
+     * [outputContainer] is cleared wholesale by a new conversation and by
+     * loading a saved one, both of which wipe the welcome view along with the
+     * messages, so it is rebuilt here rather than merely made visible again.
+     * A loaded session keeps it hidden - it already says something.
+     */
+    private fun showEmptyConversation() {
+        emptyConversation?.let { outputContainer.removeView(it) }
+        emptyConversation = buildEmptyConversation().also { outputContainer.addView(it) }
+    }
+
+    private fun buildEmptyConversation(): View =
+        LinearLayout(context).apply {
+            orientation = VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(40), dp(16), dp(40))
+            addView(TextView(context).apply {
+                text = "\uD83E\uDD16"
+                textSize = 34f
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(context).apply {
+                text = "What should we work on?"
+                setTextColor(StudioUi.palette.text)
+                textSize = StudioUi.TypeBody
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(10), 0, 0)
+            })
+            addView(TextView(context).apply {
+                text = "Ask anything, or start from a quick action above.\n" +
+                    "Type / for commands, @ to pull a file in."
+                setTextColor(StudioUi.palette.muted)
+                textSize = StudioUi.TypeSmall
+                gravity = Gravity.CENTER
+                setLineSpacing(dp(3).toFloat(), 1.15f)
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
 
     private fun updateLastMessage(text: String) {
         val last = outputContainer.getChildAt(outputContainer.childCount - 1) as? LinearLayout
@@ -1396,7 +1447,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 val target = streamView
                     ?: TextView(context).apply {
                         textSize = 13f
-                        setTextColor(Color.parseColor("#D1D5DB"))
+                        setTextColor(StudioUi.palette.text)
                         setLineSpacing(0f, 1.2f)
                         inner?.addView(this)
                     }.also { streamView = it }
@@ -1502,12 +1553,12 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             val row = LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(TextView(context).apply { this.text = icon; textSize = 14f; setPadding(0, 0, dp(8), 0) })
-                addView(TextView(context).apply { this.text = "$label "; textSize = 13f; setTextColor(Color.parseColor("#9CA3AF")) })
+                addView(TextView(context).apply { this.text = icon; textSize = StudioUi.TypeBody; setPadding(0, 0, dp(8), 0) })
+                addView(TextView(context).apply { this.text = "$label "; textSize = 13f; setTextColor(StudioUi.palette.muted) })
                 addView(TextView(context).apply {
                     this.text = display
                     textSize = 13f
-                    setTextColor(Color.parseColor("#4F8EF7"))
+                    setTextColor(StudioUi.palette.accent)
                     setTypeface(null, Typeface.BOLD)
                     isClickable = true
                     if (name == "write_file") {
@@ -1539,7 +1590,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             id = ID_DIFF
             orientation = VERTICAL
             setPadding(dp(24), dp(8), dp(8), dp(8))
-            background = StudioUi.rounded(context, fill = "#171C25", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) }
         }
         val path = args.getString("path")
@@ -1593,10 +1644,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             isFocusable = true
 
             if (role == "ai" && text.contains("change introduced") && text.startsWith("⚠️")) {
-                background = StudioUi.rounded(context, fill = "#2A1418", radiusDp = 8)
+                background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.error, radiusDp = 8)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             } else if (role == "ai" && text.contains("change fixed") && text.startsWith("✅")) {
-                background = StudioUi.rounded(context, fill = "#12251A", radiusDp = 8)
+                background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.success, radiusDp = 8)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             }
         }
@@ -1605,10 +1656,10 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             root.addView(LinearLayout(context).apply {
                 orientation = HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                addView(TextView(context).apply { this.text = "🧠"; textSize = 14f; setPadding(0, 0, dp(8), 0) })
-                addView(TextView(context).apply { this.text = "Thought"; textSize = 13f; setTextColor(Color.parseColor("#9CA3AF")) })
+                addView(TextView(context).apply { this.text = "🧠"; textSize = StudioUi.TypeBody; setPadding(0, 0, dp(8), 0) })
+                addView(TextView(context).apply { this.text = "Thought"; textSize = 13f; setTextColor(StudioUi.palette.muted) })
             })
-            root.addView(TextView(context).apply { id = ID_CONTENT; this.text = text.removePrefix("💭").trim(); textSize = 13f; setTextColor(Color.parseColor("#D1D5DB")); setPadding(dp(22), dp(4), 0, 0) })
+            root.addView(TextView(context).apply { id = ID_CONTENT; this.text = text.removePrefix("💭").trim(); textSize = 13f; setTextColor(StudioUi.palette.text); setPadding(dp(22), dp(4), 0, 0) })
             return root
         }
 
@@ -1621,7 +1672,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         if (isUser) {
             val bubble = LinearLayout(context).apply {
                 orientation = VERTICAL
-                background = StudioUi.rounded(context, fill = "#24405F", radiusDp = 14)
+                background = StudioUi.rounded(context, fill = StudioUi.palette.selectedBg, stroke = StudioUi.palette.borderStrong, radiusDp = 14)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             }
             val row = LinearLayout(context).apply {
@@ -1643,11 +1694,11 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 "system" -> "System"
                 else -> "AI"
             }
-            textSize = 11f; setTypeface(null, Typeface.BOLD)
+            textSize = StudioUi.TypeSmall; setTypeface(null, Typeface.BOLD)
             setTextColor(when (role) {
-                "user" -> Color.parseColor("#98C379")
-                "system" -> Color.parseColor("#E5C07B")
-                else -> Color.parseColor("#61AFEF")
+                "user" -> StudioUi.palette.success
+                "system" -> StudioUi.palette.warning
+                else -> StudioUi.palette.info
             })
         })
 
@@ -1661,7 +1712,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 id = ID_CONTENT
                 this.text = text
                 textSize = 13f
-                setTextColor(Color.parseColor("#D1D5DB"))
+                setTextColor(StudioUi.palette.text)
             })
         }
         val contentScroll = ScrollView(context).apply {
@@ -1743,7 +1794,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 id = ID_CONTENT
                 setText(renderInlineMarkdown(text), android.widget.TextView.BufferType.SPANNABLE)
                 textSize = 13f
-                setTextColor(Color.parseColor("#D1D5DB"))
+                setTextColor(StudioUi.palette.text)
                 setLineSpacing(0f, 1.2f)
             })
             return
@@ -1756,7 +1807,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                     container.addView(TextView(context).apply {
                         setText(renderInlineMarkdown(textPart), android.widget.TextView.BufferType.SPANNABLE)
                         textSize = 13f
-                        setTextColor(Color.parseColor("#D1D5DB"))
+                        setTextColor(StudioUi.palette.text)
                         setLineSpacing(0f, 1.2f)
                     })
                 }
@@ -1769,8 +1820,8 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                     container.addView(TextView(context).apply {
                         this.text = lang
                         textSize = 10f
-                        setTextColor(Color.parseColor("#6B7280"))
-                        setBackgroundColor(Color.parseColor("#161B22"))
+                        setTextColor(StudioUi.palette.muted)
+                        setBackgroundColor(StudioUi.palette.surface2)
                         setPadding(dp(8), dp(4), dp(8), dp(4))
                         typeface = Typeface.MONOSPACE
                     })
@@ -1778,7 +1829,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
 
                 val codeBlock = LinearLayout(context).apply {
                     orientation = VERTICAL
-                    setBackgroundColor(Color.parseColor("#0D1117"))
+                    setBackgroundColor(StudioUi.palette.bg)
                     setPadding(dp(8), dp(8), dp(8), dp(8))
                     layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
                         topMargin = if (lang.isNotEmpty()) 0 else dp(4)
@@ -1791,7 +1842,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                     this.text = code.trimEnd()
                     textSize = 11f
                     typeface = Typeface.MONOSPACE
-                    setTextColor(Color.parseColor("#C9D1D9"))
+                    setTextColor(StudioUi.palette.text)
                     setTextIsSelectable(true)
                     setLineSpacing(0f, 1.3f)
                 }
@@ -1801,7 +1852,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 val copyBtn = TextView(context).apply {
                     this.text = "📋 Copy"
                     textSize = 10f
-                    setTextColor(Color.parseColor("#4F8EF7"))
+                    setTextColor(StudioUi.palette.accent)
                     setPadding(dp(4), dp(4), 0, 0)
                     setOnClickListener {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -1887,7 +1938,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             this.text = "⚠️ AI requests: $name"
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
         })
         approvalContainer.addView(TextView(context).apply {
             this.text = "Risk: $riskLabel"
@@ -1904,8 +1955,8 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         }
         approvalContainer.addView(TextView(context).apply {
             this.text = argsPreview
-            textSize = 12f
-            setTextColor(Color.parseColor("#D1D5DB"))
+            textSize = StudioUi.TypeSmall
+            setTextColor(StudioUi.palette.text)
             setPadding(0, dp(4), 0, dp(8))
             typeface = Typeface.MONOSPACE
         })
@@ -2073,23 +2124,23 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         val layout = LinearLayout(context).apply { orientation = VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16)) }
 
         // Gemini section
-        layout.addView(TextView(context).apply { text = "Google Gemini"; setTextColor(Color.parseColor("#4285F4")); setTypeface(null, Typeface.BOLD); textSize = 14f })
-        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Google Gemini"; setTextColor(Color.parseColor("#4285F4")); setTypeface(null, Typeface.BOLD); textSize = StudioUi.TypeBody })
+        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val geminiKeyInput = EditText(context).apply {
             setText(settings.apiKey)
             hint = "Gemini API key"
             textSize = 13f
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(geminiKeyInput)
-        layout.addView(TextView(context).apply { text = "Model"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Model"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val geminiModelInput = EditText(context).apply {
             setText(settings.geminiModel)
             hint = "gemini-2.0-flash"
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(geminiModelInput)
@@ -2103,37 +2154,37 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
 
         // OpenAI section
         layout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(16)) })
-        layout.addView(TextView(context).apply { text = "OpenAI (ChatGPT)"; setTextColor(Color.parseColor("#10A37F")); setTypeface(null, Typeface.BOLD); textSize = 14f })
-        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "OpenAI (ChatGPT)"; setTextColor(Color.parseColor("#10A37F")); setTypeface(null, Typeface.BOLD); textSize = StudioUi.TypeBody })
+        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val openaiKeyInput = EditText(context).apply {
             setText(settings.openaiApiKey)
             hint = "sk-..."
             textSize = 13f
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(openaiKeyInput)
-        layout.addView(TextView(context).apply { text = "Model"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Model"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val openaiModelInput = EditText(context).apply {
             setText(settings.openaiModel)
             hint = "gpt-4o"
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(openaiModelInput)
-        layout.addView(TextView(context).apply { text = "Base URL (optional, for compatible APIs)"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Base URL (optional, for compatible APIs)"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val openaiUrlInput = EditText(context).apply {
             setText(settings.openaiBaseUrl)
             hint = "https://api.openai.com/v1"
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(openaiUrlInput)
         // Provider presets: one-tap Base URL + Model fill for OpenAI-compatible APIs
-        layout.addView(TextView(context).apply { text = "Provider Preset"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Provider Preset"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val presetNames = arrayOf(
             "(keep current)", "OpenAI", "GLM (Zhipu)", "Qwen (DashScope)",
             "NVIDIA NIM", "DeepSeek", "Moonshot (Kimi)", "Groq", "Ollama (local)"
@@ -2165,36 +2216,36 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             }
         }
         layout.addView(presetSpinner)
-        layout.addView(TextView(context).apply { text = "Max Output Tokens (per-model)"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Max Output Tokens (per-model)"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val maxTokensInput = EditText(context).apply {
             setText(settings.openaiMaxTokens.toString())
             hint = "8192"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(maxTokensInput)
 
         // Anthropic section
         layout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(16)) })
-        layout.addView(TextView(context).apply { text = "Anthropic (Claude)"; setTextColor(Color.parseColor("#D4A574")); setTypeface(null, Typeface.BOLD); textSize = 14f })
-        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Anthropic (Claude)"; setTextColor(Color.parseColor("#D4A574")); setTypeface(null, Typeface.BOLD); textSize = StudioUi.TypeBody })
+        layout.addView(TextView(context).apply { text = "API Key"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val anthropicKeyInput = EditText(context).apply {
             setText(settings.anthropicApiKey)
             hint = "sk-ant-..."
             textSize = 13f
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(anthropicKeyInput)
-        layout.addView(TextView(context).apply { text = "Model"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f })
+        layout.addView(TextView(context).apply { text = "Model"; setTextColor(StudioUi.palette.muted); textSize = 11f })
         val anthropicModelInput = EditText(context).apply {
             setText(settings.anthropicModel)
             hint = "claude-sonnet-4-20250514"
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(anthropicModelInput)
@@ -2204,22 +2255,22 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         layout.addView(TextView(context).apply {
             text = "Auto Apply Changes"
             setPadding(0, dp(8), 0, 4)
-            textSize = 12f
-            setTextColor(Color.parseColor("#9CA3AF"))
+            textSize = StudioUi.TypeSmall
+            setTextColor(StudioUi.palette.muted)
         })
         val autoApplySwitch = androidx.appcompat.widget.SwitchCompat(context).apply { isChecked = settings.autoApplyChanges }
         layout.addView(autoApplySwitch)
 
         // Local AI (llama.cpp runtime) section
         layout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(16)) })
-        layout.addView(TextView(context).apply { text = "Local AI (llama.cpp, CPU + Vulkan)"; setTextColor(Color.parseColor("#A78BFA")); setTypeface(null, Typeface.BOLD); textSize = 14f })
+        layout.addView(TextView(context).apply { text = "Local AI (llama.cpp, CPU + Vulkan)"; setTextColor(Color.parseColor("#A78BFA")); setTypeface(null, Typeface.BOLD); textSize = StudioUi.TypeBody })
         val runtimeManager = com.aide.mobilestudio.ai.LlamaRuntimeManager.get(context)
         val runtimeStatusText = TextView(context).apply {
             text = if (runtimeManager.isInstalled())
                 "Runtime: ${runtimeManager.installedVersion()} (installed)"
             else
                 "Runtime: not installed"
-            setTextColor(Color.parseColor("#9CA3AF"))
+            setTextColor(StudioUi.palette.muted)
             textSize = 11f
             typeface = Typeface.MONOSPACE
         }
@@ -2261,11 +2312,11 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                 )
             }
         })
-        layout.addView(TextView(context).apply { text = "Compute: CPU <====|=============|===> GPU"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f; setPadding(0, dp(10), 0, dp(2)) })
+        layout.addView(TextView(context).apply { text = "Compute: CPU <====|=============|===> GPU"; setTextColor(StudioUi.palette.muted); textSize = 11f; setPadding(0, dp(10), 0, dp(2)) })
         val gpuSlider = SeekBar(context).apply { max = 100 }
         val gpuSliderLabel = TextView(context).apply {
             text = ""
-            setTextColor(Color.parseColor("#C9D1D9"))
+            setTextColor(StudioUi.palette.text)
             textSize = 11f
             typeface = Typeface.MONOSPACE
         }
@@ -2298,21 +2349,21 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
         })
         layout.addView(gpuSlider)
         layout.addView(gpuSliderLabel)
-        layout.addView(TextView(context).apply { text = "CPU Threads (1-8)"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f; setPadding(0, dp(8), 0, dp(2)) })
+        layout.addView(TextView(context).apply { text = "CPU Threads (1-8)"; setTextColor(StudioUi.palette.muted); textSize = 11f; setPadding(0, dp(8), 0, dp(2)) })
         val threadsInput = EditText(context).apply {
             setText(settings.nThreads.toString())
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(threadsInput)
-        layout.addView(TextView(context).apply { text = "Context Size (512-16384)"; setTextColor(Color.parseColor("#9CA3AF")); textSize = 11f; setPadding(0, dp(8), 0, dp(2)) })
+        layout.addView(TextView(context).apply { text = "Context Size (512-16384)"; setTextColor(StudioUi.palette.muted); textSize = 11f; setPadding(0, dp(8), 0, dp(2)) })
         val contextInput = EditText(context).apply {
             setText(settings.contextLength.toString())
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             textSize = 13f
-            background = StudioUi.rounded(context, fill = "#0F1724", stroke = "#2F3B4D", radiusDp = 8)
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(contextInput)
