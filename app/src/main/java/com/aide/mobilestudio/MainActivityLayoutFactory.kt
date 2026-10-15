@@ -17,6 +17,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -26,6 +27,14 @@ import androidx.drawerlayout.widget.DrawerLayout
 import androidx.recyclerview.widget.RecyclerView
 import com.aide.mobilestudio.AppLanguage
 import java.io.File
+
+/** Bilingual label for IDE chrome (the app's own translation table is keyed on Korean). */
+private fun Context.ideLabel(en: String, ko: String): String =
+    if (AppLanguage.current(this).code == "ko") ko else en
+
+/** True when the open file can be rendered by the layout preview engine. */
+internal fun File?.isPreviewableLayout(): Boolean =
+    this != null && isFile && extension.lowercase() == "xml"
 
 private fun Context.buildToolsPanel(): View {
     val tabNames = listOf("Build", "APK", "HTML")
@@ -246,9 +255,29 @@ private fun Context.buildMainSurface(): View {
             setBackgroundColor(c(StudioUi.Ink))
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             addView(buildChrome())
-            addView(buildProjectTabStrip())
-            addView(buildTabStrip())
-            addView(buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            // The rail runs beside everything below the bar and stops short of
+            // the status line, so a status that spans the screen still spans
+            // the screen - the rail is navigation, not chrome worth two rows.
+            addView(LinearLayout(this@buildMainSurface).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f,
+                )
+                addView(buildSideRail())
+                addView(LinearLayout(this@buildMainSurface).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f,
+                    )
+                    addView(buildProjectTabStrip())
+                    addView(buildTabStrip())
+                    addView(buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                })
+            })
             addView(buildStatusBar())
         }
         addView(content)
@@ -259,38 +288,146 @@ private fun Context.isLandscapeScreen(): Boolean =
     resources.displayMetrics.widthPixels > resources.displayMetrics.heightPixels
 
 /**
- * The menu row and the toolbar row.
+ * The one top bar: menu, project switcher, workspace tabs, run.
  *
- * Portrait stacks them, which is fine because there is vertical room to spare.
- * A landscape phone has almost none - the chrome eats a fifth of the screen -
- * so the menu scrolls horizontally inside the toolbar row instead, giving the
- * editor the full 28dp back without dropping any menu: the items are found by
- * id, so moving them to another parent leaves every handler intact.
+ * The old chrome was two rows - a File/Edit/View/Build text menu stacked over
+ * a toolbar - and it spent a fifth of a phone's height on navigation that was
+ * touched maybe once a session. The menus did not disappear with it: every one
+ * of them was already listed by showMainMenu(), which nothing had bound to
+ * anything, so the hamburger now opens that and all twelve still exist.
+ *
+ * Back/forward moved onto the file tab strip where file history belongs, and
+ * every id MainActivity drives (run, sync, spinner, badges, preview) is still
+ * present here or there, so moving a row did not quietly kill a handler.
  */
 private fun Context.buildChrome(): View {
-    val menu = buildTopTextMenu()
-    val toolbar = buildPrimaryToolbar()
-    if (!isLandscapeScreen()) {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            addView(menu)
-            addView(toolbar)
-        }
-    }
     return LinearLayout(this).apply {
+        // Legacy id: applyTabletMode()/applyPhoneMode() find the toolbar by it.
+        id = R.id.build_icon_toolbar
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), 0, dp(4), 0)
         setBackgroundColor(c(StudioUi.LayerToolbar))
-        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
-        addView(toolbar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3f))
-        addView(View(this@buildChrome), LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT).apply {
-            // A hairline so the two groups read as separate, not as one row.
-            setBackgroundColor(StudioUi.color("#3E4451"))
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48))
+
+        addView(iconButton(R.id.btn_menu, android.R.drawable.ic_menu_sort_by_size, StudioUi.TextSoft, "Menu", 36))
+
+        // Project switcher. It opens the menu drawer rather than a picker that
+        // does not exist; the chevron is there so it reads as a control and
+        // not as a title, which is what it behaves like.
+        addView(TextView(this@buildChrome).apply {
+            id = R.id.tv_project_name
+            text = "MobileStudio"
+            textSize = StudioUi.TypeSmall
+            setTextColor(c(StudioUi.Text))
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(6), 0)
+            setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0)
+            compoundDrawablePadding = dp(3)
+            setOnClickListener { (context as? MainActivity)?.openMainMenuFromToolbar() }
+            StudioUi.touchLift(this)
+            StudioUi.enforceMinTouchTarget(this)
+        }, LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.MATCH_PARENT))
+
+        addView(topTab(R.id.tab_top_project, "프로젝트", "Project", selected = true))
+        addView(topTab(R.id.tab_top_run, "실행", "Run"))
+        addView(topTab(R.id.tab_top_debug, "디버그", "Debug"))
+        addView(topTab(R.id.tab_top_deploy, "배포", "Deploy"))
+        addView(topTab(R.id.tab_top_ai, "AI", "AI"))
+
+        addView(View(this@buildChrome), LinearLayout.LayoutParams(0, 1, 1f))
+
+        // Error/warning counts and the build status line: they were squeezed
+        // between the project name and the run button where they had nowhere
+        // to grow, and the status bar has room for them now.
+        addView(TextView(this@buildChrome).apply {
+            id = R.id.badge_warnings
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveAmber))
+            visibility = View.GONE
         })
-        // The menu row keeps its own 28dp height so the parent's CENTER_VERTICAL
-        // centres it instead of leaving it pinned to the top of the 40dp row.
-        addView(menu, LinearLayout.LayoutParams(0, dp(28), 2f))
+        addView(TextView(this@buildChrome).apply {
+            id = R.id.badge_errors
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveRed))
+            visibility = View.GONE
+            setPadding(dp(2), 0, dp(4), 0)
+        })
+        addView(TextView(this@buildChrome).apply {
+            id = R.id.tv_build_status
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveGreen))
+            setSingleLine(true)
+            maxEms = 8
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(4), 0, dp(4), 0)
+        })
+
+        addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 34))
+
+        // Run is the one thing that keeps its colour - it is the action the
+        // bar exists to offer.
+        addView(iconButton(R.id.btn_run, android.R.drawable.ic_media_play, StudioUi.ActiveGreen, "Build", 38))
+
+        addView(ProgressBar(this@buildChrome).apply {
+            id = R.id.build_progress
+            visibility = View.INVISIBLE
+            layoutParams = LinearLayout.LayoutParams(dp(18), dp(18))
+        })
+
+        // Kept: MainActivity flips its visibility and owns its click handler.
+        addView(hiddenIcon(R.id.btn_preview))
+    }
+}
+
+/**
+ * A workspace tab on the top bar.
+ *
+ * The design draws these as plain words in a row, which makes them look like
+ * labels rather than controls - and a 13sp word with a few dp around it is a
+ * much smaller target than anyone is aiming at. A selected state that reads
+ * at a glance plus the shared touch floor fixes both without changing how the
+ * row looks.
+ */
+private fun Context.topTab(viewId: Int, label: String, labelEn: String, selected: Boolean = false): TextView {
+    return TextView(this).apply {
+        id = viewId
+        // The destination's name, so the highlight is driven from the view
+        // itself and a new tab cannot be wired to the wrong id.
+        tag = labelEn.lowercase()
+        text = AppLanguage.literal(this@topTab, label)
+        textSize = StudioUi.TypeSmall
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setSingleLine(true)
+        setTextColor(c(if (selected) StudioUi.Text else StudioUi.Muted))
+        background = StudioUi.ripple(
+            this@topTab,
+            StudioUi.rounded(
+                this@topTab,
+                fill = if (selected) StudioUi.Surface2 else "#00000000",
+                stroke = "#00000000",
+                radiusDp = StudioUi.RadiusMd,
+            ),
+        )
+        setPadding(dp(7), 0, dp(7), 0)
+        minimumWidth = dp(46)
+        StudioUi.touchLift(this)
+        StudioUi.enforceMinTouchTarget(this)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
     }
 }
 
@@ -302,6 +439,10 @@ private fun Context.buildLandscapeMainSurface(): View {
             background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             
+            // The same rail as portrait, so rotating does not move the app's
+            // sections somewhere else entirely.
+            addView(ctx.buildSideRail())
+
             // Left pane: File tree (drawer-like, but always visible)
             val leftPane = FrameLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(320), ViewGroup.LayoutParams.MATCH_PARENT)
@@ -378,126 +519,6 @@ fun MainActivity.updateProjectTabStripVisibility(tabCount: Int) {
     }
 }
 
-private fun Context.buildTopTextMenu(): View {
-    return HorizontalScrollView(this).apply {
-        isHorizontalScrollBarEnabled = false
-        setBackgroundColor(c(StudioUi.Surface))
-        addView(LinearLayout(this@buildTopTextMenu).apply {
-            id = R.id.top_text_menu
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), 0, dp(6), 0)
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(28))
-            listOf(
-                R.id.menu_file       to AppLanguage.literal(this@buildTopTextMenu, "File"),
-                R.id.menu_edit       to AppLanguage.literal(this@buildTopTextMenu, "Edit"),
-                R.id.menu_view       to AppLanguage.literal(this@buildTopTextMenu, "View"),
-                R.id.menu_navigate   to AppLanguage.literal(this@buildTopTextMenu, "Navigate"),
-                R.id.menu_code       to AppLanguage.literal(this@buildTopTextMenu, "Code"),
-                R.id.menu_refactor   to AppLanguage.literal(this@buildTopTextMenu, "Refactor"),
-                R.id.menu_build      to AppLanguage.literal(this@buildTopTextMenu, "Build"),
-                R.id.menu_run        to AppLanguage.literal(this@buildTopTextMenu, "Run"),
-                R.id.menu_community  to AppLanguage.literal(this@buildTopTextMenu, "Community"),
-                R.id.menu_extensions to AppLanguage.literal(this@buildTopTextMenu, "Extensions"),
-                R.id.menu_ide        to "IDE",
-                R.id.menu_tools      to AppLanguage.literal(this@buildTopTextMenu, "Tools")
-            ).forEach { (viewId, label) ->
-                addView(menuText(viewId, label))
-            }
-        })
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28))
-    }
-}
-
-private fun Context.buildPrimaryToolbar(): View {
-    return LinearLayout(this).apply {
-        // Row B is the ONLY remaining toolbar row — it keeps the legacy id so
-        // applyTabletMode()/applyPhoneMode() in MainActivity keep working.
-        id = R.id.build_icon_toolbar
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(4), 0, dp(4), 0)
-        setBackgroundColor(c(StudioUi.LayerToolbar))
-        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40))
-
-        // Left: file history navigation (wired in MainActivity.setupToolbar)
-        addView(iconButton(R.id.btn_back, android.R.drawable.ic_menu_revert, StudioUi.TextSoft, "Back", 34))
-        addView(iconButton(R.id.btn_forward, android.R.drawable.ic_media_ff, StudioUi.TextSoft, "Forward", 34))
-
-        // Spacer: pushes the project name group toward the center
-        addView(View(this@buildPrimaryToolbar), LinearLayout.LayoutParams(0, 1, 1f))
-
-        // Center: Project name (fills remaining space)
-        addView(TextView(this@buildPrimaryToolbar).apply {
-            id = R.id.tv_project_name
-            text = "MobileStudio"
-            textSize = 13f
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.Text))
-            setSingleLine(true)
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), 0, dp(4), 0)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
-
-        // Center-right: Error/Warning badges
-        addView(TextView(this@buildPrimaryToolbar).apply {
-            id = R.id.badge_warnings
-            text = ""
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveAmber))
-            visibility = View.GONE
-            setPadding(dp(2), 0, dp(2), 0)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        addView(TextView(this@buildPrimaryToolbar).apply {
-            id = R.id.badge_errors
-            text = ""
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveRed))
-            visibility = View.GONE
-            setPadding(dp(2), 0, dp(4), 0)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        // Center-right: Build status text (hidden when not building)
-        addView(TextView(this@buildPrimaryToolbar).apply {
-            id = R.id.tv_build_status
-            text = ""
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveGreen))
-            setSingleLine(true)
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(4), 0, dp(4), 0)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
-
-        // Spacer: pushes sync/run to the right edge
-        addView(View(this@buildPrimaryToolbar), LinearLayout.LayoutParams(0, 1, 1f))
-
-        // Right: Sync button
-        addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 32))
-
-        // Right: Run/Build button — 유일하게 색을 남긴다(주요 액션)
-        addView(iconButton(R.id.btn_run, android.R.drawable.ic_media_play, StudioUi.ActiveGreen, "Build", 34))
-
-        // Right: build progress indicator (moved up from the deleted build toolbar;
-        // setBuildRunning() in MainActivity depends on this id being present)
-        addView(ProgressBar(this@buildPrimaryToolbar).apply {
-            id = R.id.build_progress
-            visibility = View.INVISIBLE
-            layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
-        })
-
-        // Hidden placeholder: MainActivity still drives btn_preview visibility
-        // (updatePreviewButtonVisibility) and its click handler, so this one id
-        // must keep a view in the tree. Everything else was dead code and went
-        // away together with its handler.
-        addView(hiddenIcon(R.id.btn_preview))
-    }
-}
-
 private fun Context.buildTabStrip(): View {
     return LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -515,10 +536,95 @@ private fun Context.buildTabStrip(): View {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34))
             })
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // File history lives with the file tabs. The top bar spends its width
+        // on the workspace tabs the design shows, and back/forward are about
+        // this file list rather than about the app, so they moved here - the
+        // ids and their handlers are untouched, only their parent changed.
+        addView(LinearLayout(this@buildTabStrip).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34))
+            addView(iconButton(R.id.btn_back, android.R.drawable.ic_menu_revert, StudioUi.TextSoft, "Back", 30))
+            addView(iconButton(R.id.btn_forward, android.R.drawable.ic_media_ff, StudioUi.TextSoft, "Forward", 30))
+        })
+
         addView(View(this@buildTabStrip).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
             setBackgroundColor(c(StudioUi.Divider))
         })
+    }
+}
+/**
+ * The left rail: every section of the app in one column of icon-over-label.
+ *
+ * The sections used to be scattered - some were tabs in a row across the
+ * bottom, some were entries in the tools menu, some were behind the status
+ * bar - so nothing ever said what the app contains or which part of it you
+ * were in. Each item is a full column rather than a bare glyph, so the label
+ * under the icon stays readable, and the selected one is marked by a filled
+ * outline as well as a colour, which is what makes it findable at a glance.
+ */
+private fun Context.buildSideRail(): View {
+    val items = listOf(
+        Triple(R.id.side_item_project, "🗂", "프로젝트" to "Project"),
+        Triple(R.id.side_item_search, "🔍", "검색" to "Search"),
+        Triple(R.id.side_item_problems, "✖", "문제" to "Problems"),
+        Triple(R.id.side_item_git, "⑂", "Git" to "Git"),
+        Triple(R.id.side_item_shell, ">_", "터미널" to "Terminal"),
+        Triple(R.id.side_item_chat, "💬", "Chat" to "Chat"),
+        Triple(R.id.side_item_ai, "✦", "AI" to "AI"),
+        Triple(R.id.side_item_settings, "⚙", "설정" to "Settings"),
+    )
+    return LinearLayout(this).apply {
+        id = R.id.side_bar
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        setBackgroundColor(c(StudioUi.LayerTabs))
+        setPadding(dp(2), dp(6), dp(2), dp(6))
+        layoutParams = LinearLayout.LayoutParams(dp(62), ViewGroup.LayoutParams.MATCH_PARENT)
+        items.forEach { (viewId, glyph, labels) ->
+            addView(sideRailItem(viewId, glyph, labels))
+        }
+        addView(View(this@buildSideRail), LinearLayout.LayoutParams(0, 0, 1f))
+    }
+}
+
+/**
+ * One rail destination. The tag carries the destination's name so the
+ * highlight can be driven from anywhere that changes it - a tap here, a
+ * bottom-panel tab, a shortcut - instead of only from taps on the rail,
+ * which would leave it disagreeing with the screen the moment anything else
+ * moved the app.
+ */
+private fun Context.sideRailItem(viewId: Int, glyph: String, labels: Pair<String, String>): LinearLayout {
+    return LinearLayout(this).apply {
+        id = viewId
+        tag = labels.second.lowercase()
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        setPadding(dp(2), dp(8), dp(2), dp(8))
+        isClickable = true
+        StudioUi.touchLift(this)
+        addView(TextView(this@sideRailItem).apply {
+            text = glyph
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setTextColor(c(StudioUi.InactiveIcon))
+            maxLines = 1
+        })
+        addView(TextView(this@sideRailItem).apply {
+            text = AppLanguage.literal(this@sideRailItem, labels.first)
+            textSize = StudioUi.TypeCaption
+            gravity = Gravity.CENTER
+            setTextColor(c(StudioUi.InactiveIcon))
+            maxLines = 1
+            setPadding(0, dp(1), 0, 0)
+        })
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
     }
 }
 
@@ -822,6 +928,16 @@ private fun Context.buildEditorContainer(): View {
                     setOnClickListener { (context as? MainActivity)?.toggleFindReplaceInline() }
                     contentDescription = AppLanguage.literal(this@buildEditorContainer, "Find/Replace")
                 }, LinearLayout.LayoutParams(dp(32), dp(32)))
+                // Split layout preview (Pixel-class device frames, like the IDE design).
+                addView(ImageButton(this@buildEditorContainer).apply {
+                    id = R.id.btn_preview_toggle
+                    setImageResource(android.R.drawable.ic_menu_gallery)
+                    background = StudioUi.ripple(this@buildEditorContainer, StudioUi.rounded(this@buildEditorContainer, fill = "#00000000", stroke = "#00000000", radiusDp = StudioUi.RadiusXl))
+                    setPadding(dp(6), dp(4), dp(6), dp(4))
+                    setColorFilter(c(StudioUi.TextSoft))
+                    setOnClickListener { (context as? MainActivity)?.togglePreview() }
+                    contentDescription = AppLanguage.literal(this@buildEditorContainer, "Layout preview")
+                }, LinearLayout.LayoutParams(dp(32), dp(32)))
                 // Breadcrumb
                 addView(HorizontalScrollView(this@buildEditorContainer).apply {
                     isHorizontalScrollBarEnabled = false
@@ -876,7 +992,20 @@ private fun Context.buildEditorContainer(): View {
             })
             addView(buildFindReplacePanel())
             addView(buildQuickBar())
-            addView(buildEditorOverlay(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            // Split view: code on the left, optional layout preview on the right
+            // (the 👁 toggle in the editor top bar shows/hides the right pane).
+            addView(LinearLayout(this@buildEditorContainer).apply {
+                id = R.id.editor_split
+                orientation = LinearLayout.HORIZONTAL
+                addView(
+                    buildEditorOverlay(),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                )
+                addView(
+                    buildPreviewPane(),
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f),
+                )
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
     }
@@ -957,6 +1086,65 @@ private fun Context.buildEditorOverlay(): View {
                 })
             }, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+}
+
+/**
+ * Right half of the split editor: renders the current XML layout through
+ * [LayoutLibPreviewEngine] into a device-sized image. When the LayoutLib
+ * runtime is missing the pane shows the engine's honest message instead of a
+ * fake preview.
+ */
+private fun Context.buildPreviewPane(): View {
+    return LinearLayout(this).apply {
+        id = R.id.preview_pane
+        orientation = LinearLayout.VERTICAL
+        visibility = View.GONE
+        setBackgroundColor(c(StudioUi.Surface))
+        addView(LinearLayout(this@buildPreviewPane).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setBackgroundColor(c(StudioUi.LayerToolbar))
+            addView(TextView(this@buildPreviewPane).apply {
+                id = R.id.preview_device_chip
+                text = "Pixel 7"
+                textSize = 11f
+                setTextColor(c(StudioUi.ActiveBlue))
+                background = StudioUi.ripple(
+                    this@buildPreviewPane,
+                    StudioUi.rounded(this@buildPreviewPane, fill = StudioUi.Surface2, stroke = StudioUi.Divider, radiusDp = StudioUi.RadiusMd),
+                )
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                StudioUi.touchLift(this)
+                setOnClickListener { (context as? MainActivity)?.cyclePreviewDevice() }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(View(this@buildPreviewPane), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(iconButton(R.id.preview_refresh, android.R.drawable.ic_popup_sync, StudioUi.TextSoft, "Refresh preview", 30).apply {
+                setOnClickListener { (context as? MainActivity)?.refreshPreview() }
+            })
+            addView(iconButton(R.id.preview_close, android.R.drawable.ic_menu_close_clear_cancel, StudioUi.InactiveIcon, "Close preview", 30).apply {
+                setOnClickListener { (context as? MainActivity)?.closePreview() }
+            })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(FrameLayout(this@buildPreviewPane).apply {
+            setBackgroundColor(StudioUi.palette.editorBg)
+            addView(ScrollView(this@buildPreviewPane).apply {
+                addView(ImageView(this@buildPreviewPane).apply {
+                    id = R.id.preview_image
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    adjustViewBounds = true
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                })
+            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(TextView(this@buildPreviewPane).apply {
+                id = R.id.preview_message
+                textSize = 11f
+                setTextColor(c(StudioUi.TextSoft))
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                visibility = View.GONE
+            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
     }
 }
 
@@ -1158,32 +1346,10 @@ private fun Context.buildBottomPanel(): View {
             setBackgroundColor(c(StudioUi.DividerLight))
         }
         addView(resizeHandle)
-        resizeHandle.setOnTouchListener { v, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    val startY = event.rawY
-                    val rootView = v.parent as LinearLayout
-                    val startHeight = rootView.height
-                    v.setOnTouchListener { _, e ->
-                        when (e.actionMasked) {
-                            MotionEvent.ACTION_MOVE -> {
-                                val deltaY = (startY - e.rawY).toInt()
-                                val newHeightDp = ((startHeight + deltaY) / resources.displayMetrics.density).toInt().coerceIn(300, 800)
-                                rootView.layoutParams = rootView.layoutParams.apply { height = dp(newHeightDp) }
-                                true
-                            }
-                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                v.setOnTouchListener(null)
-                                true
-                            }
-                            else -> false
-                        }
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
+        // Drag handling lives in MainActivity, which owns the panel's size
+        // state. The listener that used to sit here replaced itself on
+        // ACTION_DOWN and removed itself on ACTION_UP, so the handle worked
+        // exactly once and was dead from the second gesture onward.
     }
     val panelContent = FrameLayout(this)
     panelContent.apply {
@@ -1738,12 +1904,14 @@ private fun Context.buildPanelTabs(): View {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(4), 0, dp(4), 0)
-                addView(panelTab(R.id.tab_build, "\u25B6 Build", selected = true, iconColor = StudioUi.ActiveGreen))
-                addView(panelTab(R.id.tab_logcat, "\uD83D\uDC31 Logcat", iconColor = StudioUi.ActiveAmber))
-                addView(panelTab(R.id.tab_problems, "\u2716 Problems", iconColor = StudioUi.ActiveRed))
-                addView(panelTab(R.id.tab_search, "\uD83D\uDD0D Search", iconColor = StudioUi.ActiveBlue))
-                addView(panelTab(R.id.tab_shell, ">_ Shell", iconColor = StudioUi.ActivePurple))
-                addView(panelTab(R.id.tab_ai, "\u2728 AI", selected = false, iconColor = StudioUi.ActiveBlue))
+                // The order the design shows: diagnostics first, then the raw
+                // output they came from. Search and AI are gone from here -
+                // they live on the rail now, where they are reachable whether
+                // the panel is open or not.
+                addView(panelTab(R.id.tab_problems, ideLabel("Problems", "문제"), iconColor = StudioUi.ActiveRed))
+                addView(panelTab(R.id.tab_build, ideLabel("Build", "출력"), selected = true, iconColor = StudioUi.ActiveGreen))
+                addView(panelTab(R.id.tab_shell, ideLabel("Terminal", "터미널"), iconColor = StudioUi.ActivePurple))
+                addView(panelTab(R.id.tab_logcat, ideLabel("Logcat", "로그캣"), iconColor = StudioUi.ActiveAmber))
             })
         })
         // Build progress indicator
@@ -1828,6 +1996,9 @@ private fun Context.buildStatusBar(): View {
         addView(dividerVertical())
         // Encoding
         addView(statusText(R.id.tv_status_encoding, "UTF-8"))
+
+        // Gradle version of the open project (hidden when there is none)
+        addView(statusText(R.id.tv_status_gradle, ""))
 
         // Memory indicator
         addView(TextView(this@buildStatusBar).apply {

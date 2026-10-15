@@ -218,4 +218,29 @@
     <item name="btn_terminal_right" type="id" />
     <item name="btn_terminal_enter" type="id" />
     <item name="btn_terminal_backspace" type="id" />
+    <item name="editor_split" type="id" />
+    <item name="btn_preview_toggle" type="id" />
+    <item name="preview_pane" type="id" />
+    <item name="preview_device_chip" type="id" />
+    <item name="preview_image" type="id" />
+    <item name="preview_message" type="id" />
+    <item name="preview_refresh" type="id" />
+    <item name="preview_close" type="id" />
+    <item name="tv_status_gradle" type="id" />
+    <item name="tab_top_project" type="id" />
+    <item name="tab_top_run" type="id" />
+    <item name="tab_top_debug" type="id" />
+    <item name="tab_top_deploy" type="id" />
+    <item name="tab_top_ai" type="id" />
+    <item name="side_bar" type="id" />
+    <item name="side_item_project" type="id" />
+    <item name="side_item_search" type="id" />
+    <item name="side_item_problems" type="id" />
+    <item name="side_item_git" type="id" />
+    <item name="side_item_shell" type="id" />
+    <item name="side_item_chat" type="id" />
+    <item name="side_item_ai" type="id" />
+    <item name="side_item_settings" type="id" />
+    <item name="win64_status_column" type="id" />
+    <item name="win64_console" type="id" />
 </resources>

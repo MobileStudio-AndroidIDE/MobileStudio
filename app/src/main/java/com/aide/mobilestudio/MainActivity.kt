@@ -293,6 +293,8 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
         setupTabs()
         setupBottomPanel()
         setupToolbar()
+        setupTopBar()
+        setupSideRail()
         setupWelcomeScreen()
         setupLogcat()
         setupEditorFeatures()
@@ -1470,6 +1472,142 @@ Long press: Toggle Shell panel"""
         }
     }
 
+    /**
+     * Opens the menu list. Bound to the hamburger and to the project switcher
+     * in the top bar.
+     *
+     * The File/Edit/View/Build/Run/Tools menus used to have their own row
+     * across the top; the redesign spends that row on the workspace tabs
+     * instead, and this is how the menus survive it - showMainMenu() had
+     * already listed every one of them, so nothing was written to keep them
+     * reachable, only nothing ever called it.
+     */
+    fun openMainMenuFromToolbar() = showMainMenu()
+
+    /** Opens the explorer drawer - what the project name and the rail's project item mean. */
+    fun openProjectDrawer() {
+        if (drawerLayout.isDrawerOpen(GravityCompat.END)) drawerLayout.closeDrawer(GravityCompat.END)
+        if (drawerLayout.isDrawerOpen(GravityCompat.START)) return
+        drawerLayout.openDrawer(GravityCompat.START)
+    }
+
+    /**
+     * Binds the left rail.
+     *
+     * Every destination lands on something that already implemented it rather
+     * than on a new screen: the rail is a way to reach the app's sections, not
+     * a second implementation of them, so tapping it does exactly what the
+     * matching menu entry, panel tab or dialog always did. That is what keeps
+     * it from going stale - there is only ever one copy of each behaviour.
+     */
+    /**
+     * Binds the top bar: the hamburger and the workspace tabs.
+     *
+     * The tabs read as four modes, but the app has no four modes to switch
+     * between - so each one lands on the surface that already does that job
+     * (실행 on the build output, 디버그 on logcat, 배포 on installing the last
+     * APK) instead of on a stub that would look like a mode and do nothing.
+     */
+    private fun setupTopBar() {
+        findViewById<ImageButton>(R.id.btn_menu)?.setOnClickListener {
+            MobileStudioCrashGuard.safe(this, "MainActivity.menuButton") { openMainMenuFromToolbar() }
+        }
+        val tabs = mapOf<Int, () -> Unit>(
+            R.id.tab_top_project to { openProjectDrawer() },
+            R.id.tab_top_run to { showBottomPanel(); switchToPanel("build") },
+            R.id.tab_top_debug to { showBottomPanel(); switchToPanel("logcat") },
+            R.id.tab_top_deploy to { installLatestApk() },
+            R.id.tab_top_ai to { openAiWorkspace() },
+        )
+        tabs.forEach { (viewId, action) ->
+            findViewById<TextView>(viewId)?.setOnClickListener {
+                MobileStudioCrashGuard.safe(this, "MainActivity.topTab") {
+                    val kind = it.tag as? String
+                    action()
+                    if (kind != null) highlightTopTab(kind)
+                }
+            }
+        }
+        highlightTopTab("project")
+    }
+
+    /** Marks the active workspace tab in the top bar. See [highlightSideRail] for why the tag is the source of truth. */
+    fun highlightTopTab(kind: String) {
+        val ids = listOf(
+            R.id.tab_top_project, R.id.tab_top_run, R.id.tab_top_debug,
+            R.id.tab_top_deploy, R.id.tab_top_ai,
+        )
+        ids.forEach { id ->
+            val tab = findViewById<TextView>(id) ?: return@forEach
+            val selected = tab.tag == kind
+            tab.setTextColor(c(if (selected) StudioUi.Text else StudioUi.Muted))
+            tab.background = if (selected) {
+                StudioUi.rounded(this, fill = StudioUi.Surface2, radiusDp = StudioUi.RadiusMd)
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun setupSideRail() {
+        val bindings = mapOf<Int, () -> Unit>(
+            R.id.side_item_project to { openProjectDrawer() },
+            R.id.side_item_search to { showBottomPanel(); switchToPanel("search") },
+            R.id.side_item_problems to { showBottomPanel(); switchToPanel("problems") },
+            R.id.side_item_git to {
+                val dir = currentProjectDir
+                if (dir != null) gitManager.showGitDialog(dir) else showToast(ui("Open a project first"))
+            },
+            R.id.side_item_shell to { showBottomPanel(); switchToPanel("shell") },
+            R.id.side_item_chat to { showBottomPanel(); switchToPanel("ai") },
+            R.id.side_item_ai to { openAiWorkspace() },
+            R.id.side_item_settings to { showSettingsDialog() },
+        )
+        bindings.forEach { (viewId, action) ->
+            findViewById<LinearLayout>(viewId)?.setOnClickListener {
+                MobileStudioCrashGuard.safe(this, "MainActivity.sideRail") {
+                    val kind = it.tag as? String
+                    action()
+                    if (kind != null) highlightSideRail(kind)
+                }
+            }
+        }
+        highlightSideRail("project")
+    }
+
+    /**
+     * Marks the current section on the left rail.
+     *
+     * The destination is read from each item's own tag instead of a parallel
+     * list of ids, so a rail entry cannot end up highlighted by the wrong
+     * handler, and [switchToPanel] calls this too - the rail is the only thing
+     * that says where you are, and it would be lying as soon as a bottom-panel
+     * tab moved you somewhere else.
+     */
+    fun highlightSideRail(kind: String) {
+        val rail = findViewById<LinearLayout>(R.id.side_bar) ?: return
+        for (i in 0 until rail.childCount) {
+            val item = rail.getChildAt(i) ?: continue
+            val selected = item.tag == kind
+            item.background = if (selected) {
+                StudioUi.rounded(
+                    this,
+                    fill = StudioUi.Surface2,
+                    stroke = StudioUi.ActiveBlue,
+                    radiusDp = StudioUi.RadiusMd,
+                )
+            } else {
+                null
+            }
+            if (item !is ViewGroup) continue
+            for (j in 0 until item.childCount) {
+                (item.getChildAt(j) as? TextView)?.setTextColor(
+                    c(if (selected) StudioUi.ActiveBlue else StudioUi.InactiveIcon),
+                )
+            }
+        }
+    }
+
     private fun bindTopTextMenus() {
         findViewById<TextView>(R.id.menu_file)?.setOnClickListener { showFileMenu() }
         findViewById<TextView>(R.id.menu_edit)?.setOnClickListener { showEditMenu() }
@@ -1544,6 +1682,7 @@ Long press: Toggle Shell panel"""
 
     private fun showToolsMenu() = showTextMenu(ui("Tools"), listOf(
         ui("Open Build Tools") to { ToolsActivity.start(this) },
+        ui("Wine & Box64") to { Win64ManagerActivity.start(this) },
         ui("Dependency Search") to {
             val dir = currentProjectDir
             if (dir != null) DependencySearchDialog(this).show(dir)
@@ -3642,6 +3781,11 @@ Long press: Toggle Shell panel"""
 
     fun openFile(file: File) {
         saveCurrentFile()
+        // The split preview only makes sense for XML layouts: close it when the
+        // newly opened file cannot be previewed so the code keeps the full width.
+        if (!file.isPreviewableLayout()) {
+            findViewById<View>(R.id.preview_pane)?.visibility = View.GONE
+        }
         val fileKind = MediaDetector.detect(file)
         if (MediaDetector.isMedia(fileKind)) {
             MediaViewerActivity.start(this, file)
@@ -3844,6 +3988,7 @@ Long press: Toggle Shell panel"""
                     if (ko) "box64로 빌드 & 실행" else "Build & Run (box64)",
                     if (ko) "빌드만 (clang + mingw)" else "Build only (clang + mingw)",
                     if (ko) "box64로 실행" else "Run with box64",
+                    if (ko) "Wine/Box64 설치 화면" else "Wine/Box64 manager",
                     if (ko) "경로 복사" else "Copy Path",
                     if (ko) "체인 테스트 (linker64 → box64)" else "Chain test (linker64 → box64)"
                 )
@@ -3855,8 +4000,9 @@ Long press: Toggle Shell panel"""
                     }
                     1 -> runWindowsExeBuild(file.parentFile)
                     2 -> runExeWithBox64(file)
-                    3 -> copyPathToClipboard(file)
-                    4 -> runChainTestUi()
+                    3 -> Win64ManagerActivity.start(this)
+                    4 -> copyPathToClipboard(file)
+                    5 -> runChainTestUi()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -4918,6 +5064,48 @@ Long press: Toggle Shell panel"""
                 }
             }
             true
+        }
+
+        var stripStartY = 0f
+        var stripStartX = 0f
+        var stripStartSize = 0
+        // The strip under the tab row resizes the panel too. It is the handle
+        // a user's thumb actually finds while looking at the panel, and it had
+        // the worst bug of the two: the factory's listener installed a second
+        // listener on ACTION_DOWN and then removed itself on ACTION_UP, so one
+        // drag was all it ever managed - the second gesture landed on a view
+        // with nothing listening. One listener now, for the whole gesture, and
+        // it records the new size so hiding and showing the panel keeps it.
+        findViewById<View>(R.id.panel_resize_handle)?.setOnTouchListener { _, event ->
+            val panelParams = bottomPanel.layoutParams as? LinearLayout.LayoutParams
+            val resizeHorizontally = panelParams != null && panelParams.width > 0
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    stripStartY = event.rawY
+                    stripStartX = event.rawX
+                    stripStartSize = if (resizeHorizontally) bottomPanel.width else bottomPanel.height
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    if (resizeHorizontally) {
+                        val width = (stripStartSize + (event.rawX - stripStartX).toInt())
+                            .coerceIn(dp(220), dp(560))
+                        panelParams?.width = width
+                        bottomPanelExpandedWidth = width
+                    } else {
+                        val height = (stripStartSize - (event.rawY - stripStartY).toInt())
+                            .coerceIn(dp(160), dp(1400))
+                        bottomPanel.layoutParams.height = height
+                        bottomPanelExpandedHeight = height
+                    }
+                    bottomPanel.requestLayout()
+                    true
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> true
+                else -> false
+            }
         }
 
         problemsRecycler.layoutManager = LinearLayoutManager(this).apply {
@@ -8104,6 +8292,88 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         }
     }
 
+    // =====================================================================
+    // Split layout preview (에디터 미리보기 버튼)
+    // =====================================================================
+
+    /** Device presets for the split preview (name, width px, height px). */
+    private val previewDevices = listOf(
+        Triple("Pixel 7", 1080, 2400),
+        Triple("Pixel 7 Pro", 1440, 3120),
+        Triple("Pixel 5", 1080, 2340),
+        Triple("Galaxy S23", 1080, 2340),
+    )
+    private var previewDeviceIndex = 0
+    private var previewEngine: LayoutLibPreviewEngine? = null
+
+    /** Shows the preview pane for XML layouts; hides it otherwise. */
+    fun togglePreview() {
+        val pane = findViewById<View>(R.id.preview_pane) ?: return
+        if (pane.visibility == View.VISIBLE) {
+            pane.visibility = View.GONE
+            return
+        }
+        if (!currentFile.isPreviewableLayout()) {
+            showToast(AppLanguage.literal(this, "XML 레이아웃 파일만 미리볼 수 있습니다"))
+            return
+        }
+        pane.visibility = View.VISIBLE
+        renderPreview()
+    }
+
+    fun cyclePreviewDevice() {
+        previewDeviceIndex = (previewDeviceIndex + 1) % previewDevices.size
+        if (findViewById<View>(R.id.preview_pane)?.visibility == View.VISIBLE) renderPreview()
+    }
+
+    fun refreshPreview() {
+        if (findViewById<View>(R.id.preview_pane)?.visibility == View.VISIBLE) renderPreview()
+    }
+
+    fun closePreview() {
+        findViewById<View>(R.id.preview_pane)?.visibility = View.GONE
+    }
+
+    /**
+     * Renders the open layout at the selected device size. Runs off the main
+     * thread and ignores stale results when the pane was closed or the file
+     * changed while rendering.
+     */
+    private fun renderPreview() {
+        val file = currentFile ?: return
+        val device = previewDevices[previewDeviceIndex]
+        findViewById<TextView>(R.id.preview_device_chip)?.text = device.first
+        val message = findViewById<TextView>(R.id.preview_message) ?: return
+        val image = findViewById<ImageView>(R.id.preview_image) ?: return
+        val renderToken = file.absolutePath
+        message.visibility = View.VISIBLE
+        message.text = AppLanguage.literal(this, "미리보기 렌더링 중…")
+        image.setImageDrawable(null)
+        scope.launch {
+            val engine = previewEngine ?: LayoutLibPreviewEngine(this@MainActivity).also { previewEngine = it }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { engine.render(file, device.second, device.third) }.getOrNull()
+            }
+            // Drop stale renders: pane closed or a different file open now.
+            if (findViewById<View>(R.id.preview_pane)?.visibility != View.VISIBLE) return@launch
+            if (currentFile?.absolutePath != renderToken) return@launch
+            if (result?.status == LayoutLibPreviewEngine.Status.RENDERED && result.imageFile != null) {
+                val bitmap = withContext(Dispatchers.IO) {
+                    runCatching { android.graphics.BitmapFactory.decodeFile(result.imageFile.absolutePath) }.getOrNull()
+                }
+                if (bitmap != null) {
+                    message.visibility = View.GONE
+                    image.setImageBitmap(bitmap)
+                    return@launch
+                }
+            }
+            image.setImageDrawable(null)
+            message.visibility = View.VISIBLE
+            message.text = (result?.message ?: AppLanguage.literal(this@MainActivity, "미리보기를 생성하지 못했습니다")) +
+                (result?.detail?.takeIf { it.isNotBlank() }?.let { "\n\n$it" } ?: "")
+        }
+    }
+
     // MobileStudio comment
     fun openAiChatFromEditor() {
         openAiWorkspace()
@@ -8775,7 +9045,32 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         }
         tvStatusEncoding.text = currentFileEncoding
         tvStatusEncoding.setOnClickListener { showEncodingDialog() }
+        findViewById<TextView>(R.id.tv_status_gradle)?.let { view ->
+            view.text = projectGradleVersion().let { v -> if (v.isBlank()) "" else "Gradle $v" }
+        }
     }
+
+    /**
+     * Gradle version of the open project, read from the wrapper properties
+     * (`distributionUrl=…gradle-8.4-bin.zip`). Empty when there is no project
+     * or no wrapper — the status bar simply hides the segment then.
+     */
+    private fun projectGradleVersion(): String {
+        val root = currentProjectDir ?: return ""
+        if (root == lastGradleVersionProject) return lastGradleVersion
+        val version = runCatching {
+            val props = File(root, "gradle/wrapper/gradle-wrapper.properties")
+            if (!props.isFile) return@runCatching ""
+            Regex("""gradle-([0-9][0-9A-Za-z.\-_]*)-(?:bin|all)\.zip""")
+                .find(props.readText())?.groupValues?.get(1).orEmpty()
+        }.getOrDefault("")
+        lastGradleVersionProject = root
+        lastGradleVersion = version
+        return version
+    }
+
+    private var lastGradleVersionProject: File? = null
+    private var lastGradleVersion: String = ""
 
     internal fun showBottomPanel() {
         bottomPanel.animate().cancel()
@@ -9109,6 +9404,18 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
         updateDrawerLockState()
         wireTerminalToolbar()
         highlightPanelTab(name)
+        // The rail is the only thing that says where you are, so it follows a
+        // panel switch as well as a tap on itself - a bottom-panel tab moves
+        // you just as surely as the rail does, and leaving the rail pointing at
+        // the last thing you tapped there would have it disagreeing with the
+        // screen from then on. Build and logcat are not on the rail: they are
+        // states of the dock, not places.
+        when (name) {
+            "search" -> highlightSideRail("search")
+            "problems" -> highlightSideRail("problems")
+            "shell" -> highlightSideRail("shell")
+            "ai" -> highlightSideRail("chat")
+        }
 if (name == "logcat") {
             logcatManager?.setFilterPackage(currentProjectDir?.let { detectPackage(it) })
         }
