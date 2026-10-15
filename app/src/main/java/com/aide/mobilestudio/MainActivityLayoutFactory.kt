@@ -339,40 +339,6 @@ private fun Context.buildChrome(): View {
 
         addView(View(this@buildChrome), LinearLayout.LayoutParams(0, 1, 1f))
 
-        // Error/warning counts and the build status line: they were squeezed
-        // between the project name and the run button where they had nowhere
-        // to grow, and the status bar has room for them now.
-        addView(TextView(this@buildChrome).apply {
-            id = R.id.badge_warnings
-            text = ""
-            textSize = StudioUi.TypeCaption
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveAmber))
-            visibility = View.GONE
-        })
-        addView(TextView(this@buildChrome).apply {
-            id = R.id.badge_errors
-            text = ""
-            textSize = StudioUi.TypeCaption
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveRed))
-            visibility = View.GONE
-            setPadding(dp(2), 0, dp(4), 0)
-        })
-        addView(TextView(this@buildChrome).apply {
-            id = R.id.tv_build_status
-            text = ""
-            textSize = StudioUi.TypeCaption
-            typeface = Typeface.MONOSPACE
-            setTextColor(c(StudioUi.ActiveGreen))
-            setSingleLine(true)
-            maxEms = 8
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            gravity = Gravity.CENTER_VERTICAL
-            visibility = View.GONE
-            setPadding(dp(4), 0, dp(4), 0)
-        })
-
         addView(iconButton(R.id.btn_sync_now, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 34))
 
         // Run is the one thing that keeps its colour - it is the action the
@@ -1968,6 +1934,45 @@ private fun Context.buildStatusBar(): View {
         setPadding(dp(8), 0, dp(8), 0)
         setBackgroundColor(c(StudioUi.LayerStatusBar))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28))
+
+        // Error and warning counts first: the design puts them at the leading
+        // edge of the status line, where there is room for them to grow and
+        // where they sit next to the thing they describe. They were squeezed
+        // into the top bar, which has no space left for a count that can reach
+        // three digits.
+        addView(TextView(this@buildStatusBar).apply {
+            id = R.id.badge_warnings
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveAmber))
+            visibility = View.GONE
+        })
+        addView(TextView(this@buildStatusBar).apply {
+            id = R.id.badge_errors
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveRed))
+            visibility = View.GONE
+            setPadding(dp(2), 0, dp(6), 0)
+        })
+        addView(TextView(this@buildStatusBar).apply {
+            id = R.id.tv_build_status
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveGreen))
+            setSingleLine(true)
+            maxEms = 10
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dp(2), 0, dp(6), 0)
+        })
+        addView(View(this@buildStatusBar), LinearLayout.LayoutParams(dp(1), dp(14)).apply {
+            setBackgroundColor(c(StudioUi.Divider))
+        })
 
         // Left: status message
         addView(statusText(R.id.tv_status_left, "Ready"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
