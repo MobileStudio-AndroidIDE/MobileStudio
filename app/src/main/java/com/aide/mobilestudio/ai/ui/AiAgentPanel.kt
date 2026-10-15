@@ -350,7 +350,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
         }
         tokenCounter = TextView(context).apply {
-            this.text = "0 tokens"
+            this.text = "— t/s"
             textSize = 10f
             setTextColor(StudioUi.palette.muted)
             setPadding(dp(4), dp(4), dp(12), dp(4))
@@ -610,6 +610,25 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
 
     private var engineState = AiAgentEngine.AgentState.IDLE
 
+    // Generation speed, not transcript size: what the counter by the header
+    // reports is how fast the model is producing tokens right now. The clock
+    // starts when the engine leaves idle for GENERATING and the character
+    // count is the length of the streamed reply, which onMessage hands over
+    // in full on every chunk. Tokens are estimated the same way everywhere
+    // else in the app - four characters to the token.
+    private var rateStartMs = 0L
+    private var rateChars = 0L
+    private var lastTokensPerSec = 0.0
+    private var lastRatePaintMs = 0L
+
+    // Four characters to the token - the same estimate the rest of the app
+    // uses, so the number here agrees with OcMessage.estimateTokens().
+    private val tokensPerChar = 4.0
+
+    // onMessage arrives once per streamed chunk, which is far more often than
+    // anyone reads a number off the screen.
+    private val ratePaintIntervalMs = 200L
+
     private fun updateModelList() {
         val models = mutableListOf<String>()
         val providerLabels = mutableListOf<String>()
@@ -766,6 +785,9 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             override fun onMessage(text: String, isComplete: Boolean) {
                 post {
                     updateLastMessage(text)
+                    // onMessage hands over the whole reply so far, not a delta,
+                    // so the character count is just its length.
+                    rateChars = text.length.toLong()
                     if (isComplete) {
                         finalizeLastMessage()
                         updateTokenCount()
@@ -776,6 +798,12 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
                                 commandOutputScroll.visibility = View.GONE
                                 commandOutputText.text = ""
                             }, 3000)
+                        }
+                    } else if (rateStartMs > 0) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastRatePaintMs >= ratePaintIntervalMs) {
+                            lastRatePaintMs = now
+                            updateTokenCount()
                         }
                     }
                 }
@@ -828,6 +856,21 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             override fun onStateChange(state: AiAgentEngine.AgentState) {
                 post {
                     engineState = state
+                    // The rate clock: it starts when streaming begins and stops
+                    // the moment the engine leaves GENERATING, which freezes the
+                    // finished turn's average on screen instead of blanking it.
+                    if (state == AiAgentEngine.AgentState.GENERATING) {
+                        if (rateStartMs == 0L) {
+                            rateStartMs = System.currentTimeMillis()
+                            rateChars = 0L
+                            lastRatePaintMs = 0L
+                        }
+                    } else if (rateStartMs > 0L) {
+                        val elapsedSec = (System.currentTimeMillis() - rateStartMs).coerceAtLeast(1L) / 1000.0
+                        lastTokensPerSec = (rateChars / tokensPerChar) / elapsedSec
+                        rateStartMs = 0L
+                        updateTokenCount()
+                    }
                     when (state) {
                         AiAgentEngine.AgentState.GENERATING -> {
                             thinkingStatus = "Writing response"
@@ -1497,10 +1540,19 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
     }
 
     private fun updateTokenCount() {
-        val tokens = engine.estimateTokens()
+        // Tokens per second, not characters in the transcript. Live while the
+        // engine is streaming, the finished turn's average once it stops, and
+        // a dash before there is anything to measure.
+        val live = rateStartMs > 0
+        val rate = if (live) {
+            val elapsedSec = (System.currentTimeMillis() - rateStartMs).coerceAtLeast(1L) / 1000.0
+            (rateChars / tokensPerChar) / elapsedSec
+        } else {
+            lastTokensPerSec
+        }
         tokenCounter.text = when {
-            tokens > 1000 -> "${tokens / 1000}.${(tokens % 1000) / 100}k tokens"
-            else -> "$tokens tokens"
+            rate > 0 -> String.format(java.util.Locale.US, "%.1f t/s", rate)
+            else -> "— t/s"
         }
     }
 
