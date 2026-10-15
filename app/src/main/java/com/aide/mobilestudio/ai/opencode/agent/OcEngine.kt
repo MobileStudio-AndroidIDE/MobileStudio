@@ -355,6 +355,20 @@ class OcEngine(private val context: Context) : EngineBridge {
 
     fun listAgents(): List<OcAgent> = agentRegistry.listVisible()
 
+    fun currentAgentName(): String = agentName
+
+    /**
+     * Runs conversation compaction for the active session on demand (OpenCode's
+     * `/compact`). Returns false when there is no session or no usable model.
+     */
+    suspend fun compactNow(): Boolean {
+        val session = currentSession ?: return false
+        val agent = agentRegistry.get(agentName)
+        val model = resolveModelFor(agent) ?: return false
+        runCompaction(session, model, agent)
+        return true
+    }
+
     fun currentAgent(): OcAgent = agentRegistry.get(agentName)
 
     fun setAgent(name: String) {

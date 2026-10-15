@@ -314,6 +314,126 @@ Phase 6 UI(미완) → Phase 8 테스트/빌드(수행).
   `ExtensionBuilder` nullable)도 수정. Kotlin 증분 캐시 충돌은 캐시 정리로 해소.
 - 실제 언어 서버 프로세스 실행/실기기 검증은 미수행.
 
+---
+
+## 16. 5차 작업 — IDE 디자인 적용 (스크린샷 레이아웃)
+
+### 내비게이션 레일 + 화면 구조
+- 가로 탭 스트립을 **왼쪽 내비게이션 레일 5개**로 교체:
+  **프로젝트(파일) / 검색 / Git / AI 어시스턴트 / 설정** (아이콘+라벨, 선택 강조).
+- **프로젝트 화면 신규**: 폴더 탐색기(브레드크럼·위로·아이콘·크기), 파일 탭 →
+  미리보기 / AI 설명 요청 / AI 수정 요청 / 편집기에서 열기.
+- **Git 화면 신규**: 상태·로그·Diff·브랜치 버튼 → `git` 실행 결과 표시(git 없으면 정직한 오류).
+- **AI 어시스턴트 화면**: 헤더(AI 어시스턴트 + 에이전트 칩 + 압축 + 모델 칩) +
+  **채팅/계획/프로젝트/도구** 세그먼트 바(스크린샷과 동일), 프로젝트=변경/진단, 도구=도구/자원/터미널 2차 선택.
+- **설정 화면**: 설정/세션/모델 세그먼트 바.
+
+### 채팅 화면 (스크린샷 요소)
+- **퀵액션 칩**: 프로젝트 생성하기 · 문제 해결하기 · 리팩토링하기 · 파일 생성하기 ·
+  프로젝트 분석하기 · 테스트 작성하기 (2행 그리드, 탭 시 프롬프트 전송).
+- **작성 바**: 📎 첨부(이미지→base64 전송, 텍스트→입력창 삽입), 🎤 음성 입력
+  (SpeechRecognizer + RECORD_AUDIO 런타임 권한), 전송/중지 버튼.
+- **하단 상태바**: 상태(준비/생각/작성/작업/승인/오류) · 토큰 수 · 모델 · UTF-8.
+- 상단바 우측: 🔍 검색, **▶ 실행**(gradlew assembleDebug), 🧹 정리(clean) — 터미널에서 실행.
+
+### OpenCode 유사 기능 추가
+- **에이전트 모드 선택기**(build/plan/… → `OcEngine.setAgent`).
+- **대화 압축(Compact)** 버튼 → `OcEngine.compactNow()`(기존 compaction 재사용).
+- 슬래시 명령·@파일 멘션·컨텍스트 배지·편집기 복귀는 기존(동시 작업) 구현과 통합 유지.
+
+### 검증
+- `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:assembleDebug` 모두 성공.
+- 전체 테스트 594개, 실패 0.
+- 실기기 UI 런타임(음성 인식 실동작, gradle 실행)은 미검증 — 환경 제약으로 명시.
+
+---
+
+## 17. 6차 작업 — 코드 에디터 (스크린샷 오른쪽 화면)
+
+기존 에디터는 이미 상단 툴바(Shell/커맨드팔레트/AI/찾기·오류내비), 파일 탭,
+하단 패널(빌드/로그캣/문제/검색/셸/AI), 상태바(Ln·Col·인코딩·언어·오류수)를 갖추고
+있었다. 스크린샷 대비 비어 있던 두 가지를 채웠다.
+
+### 분할 미리보기 (Pixel 7 / Android 14 스타일)
+- 에디터 툴바에 **미리보기 토글 버튼** 신설. XML 레이아웃을 열면 코드(왼쪽) +
+  **미리보기 패널(오른쪽)** 분할 표시.
+- **기기 프리셋 칩**: Pixel 7 / Pixel 7 Pro / Pixel 5 / Galaxy S23 (탭할 때마다 순환) →
+  해당 해상도로 `LayoutLibPreviewEngine.render()` 재실행.
+- 새로고침·닫기 버튼, 렌더링은 IO 스레드, 닫힘/파일 변경 시 **오래된 결과 폐기**.
+- LayoutLib 런타임이 없으면 가짜 미리보기 대신 엔진의 안내 메시지를 그대로 표시.
+- XML이 아닌 파일을 열면 패널 자동 숨김(`openFile` 훅).
+
+### 하단 패널 탭 한국어화
+- Build→**출력**, Problems→**문제**, Shell→**터미널**, Logcat→**로그캣**, Search→**검색**
+  (`ideLabel` 헬퍼 — 한국어 UI일 때만 한국어, 영어 UI는 기존 영어 유지).
+
+### 상태바
+- **Gradle 버전 세그먼트** 신설: 프로젝트 `gradle/wrapper/gradle-wrapper.properties`에서
+  `distributionUrl`의 버전을 읽어 "Gradle 8.4" 표시(없으면 숨김, 프로젝트별 캐시).
+
+### 검증
+- `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:assembleDebug` 성공.
+- 실기기에서 LayoutLib 렌더 실동작 검증은 미수행(런타임 설치 필요).
+
+---
+
+## 18. 실기기 크래시 수정 (SM-S926N, Android 16)
+
+**증상**: AI 워크스페이스 실행 즉시
+`RuntimeException: Unable to instantiate activity AiWorkspaceActivity`
+→ `NullPointerException: getFilesDir() on a null object reference`
+(OcSessionStore ← OcEngine ← AiWorkspaceActivity.<init>)
+
+**원인**: `AiWorkspaceActivity`가 **필드 초기화자**에서 `OcEngine(this)` /
+`WorkspaceValidation(this)`를 생성. 액티비티 필드 초기화는 프레임워크가
+base context를 attach하기 **전**에 실행되므로 `ContextWrapper.getFilesDir()`가
+NPE. (`AiAgentPanel`은 attach된 MainActivity 컨텍스트를 받으므로 문제없었음)
+
+**수정**
+- 두 필드를 `lateinit var`로 바꾸고 `onCreate()` 최상단(super.onCreate 직후,
+  setContentView 이전)에서 생성 — attach 이후이므로 filesDir/SharedPreferences 사용 가능.
+- 동일 패턴 재발 방지를 위해 클래스 KDoc에 원인 기록.
+- 부수 정리: 파일 탭 "AI에게 설명 요청"이 닫히지 않은 코드펜스를 보내던 프롬프트 수정,
+  "수정 요청"은 즉시 전송 대신 입력창에 미리 채우도록 개선.
+
+**검증**: 컴파일/전체 테스트/APK 빌드 통과. 실기기 재설치 후 확인 필요.
+
+---
+
+## 19. 7차 작업 — Wine & Box64 (Windows .exe 실행)
+
+### 조사 결과 (실측)
+- 프로젝트에 이미 **완성된 실행 체인**이 있었다: `WindowsExeEnvironment`(1,085줄) —
+  **linker64 → box64(ARM64) → wine64(x86_64) → app.exe**, SELinux noexec 우회,
+  glibc/x86_64 라이브러리 분리, prefix 부팅, clang+mingw로 .exe 크로스빌드까지 구현.
+- 다운로드 소스 실확인: mobox GitLab `wine-ge-custom.tar.xz` 응답(바이너리),
+  GitHub `Box64-arm64` 릴리스 에셋(57 MB, sha256 포함) 존재.
+- **진짜 빠진 것**: `env.install(...)`을 호출하는 UI가 전무 → 신규 설치에서는 영구히
+  "environment not installed". (문서가 참조하는 "Tools > Wine & Box64" 화면도 없었음)
+
+### 추가한 것
+- **`Win64ManagerActivity`** (Wine & Box64 관리 화면):
+  - 구성 요소 상태 카드: box64(bionic/glibc 종류) · glibc loader · wine64 · Wine prefix
+    (설치 여부/크기/경로 탭복사).
+  - 액션: **전체 설치**, 상태 새로고침, **건강 검사**(500KB 규칙 재설치),
+    **Wine prefix 초기화**(첫 실행 wineboot), **체인 테스트**(linker64→box64 진단),
+    **버전 확인**(wine64 --version, box64 --version) — 콘솔 출력, 작업 중 중복 실행 차단.
+- **진입점 2곳**: Tools 메뉴 "Wine & Box64", .exe 파일 다이얼로그 "Wine/Box64 설치 화면".
+- **테스트**: `ExecutableSecurityScannerTest`(5) — 신뢰레벨/해시/정책 차단/요약.
+  (scan()의 실파일 경로는 JNI 아키텍처 검사를 호출하므로 JVM 테스트에서 제외, 기기 테스트 필요)
+
+### 정직한 한계
+- Wine을 **소스에서 포팅/컴파일한 것**이 아니라, 검증된 사전 빌드 런타임을 내려받는 방식
+  (ARM64에서 x86_64 Windows .exe를 돌리는 표준 접근). Wine 소스 크로스컴파일은
+  수 시간 규모의 별도 프로젝트이며 이 세션 범위 밖.
+- 실행 대상은 **x86_64 Windows PE**. Windows ARM64 PE 전용 네이티브 Wine 체인은 미구현.
+- 실기기에서의 실제 .exe 실행 검증은 이 환경에서 불가(기기 필요). 에뮬레이션 특성상
+  성능은 네이티브 대비 느리고 GPU/DirectX 가속은 없음.
+
+
+
+
+
 
 
 

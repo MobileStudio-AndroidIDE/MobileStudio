@@ -88,6 +88,9 @@ class AiWorkspaceActivity : AppCompatActivity() {
         /** Tools whose successful run means a project file was modified. */
         private val FILE_CHANGING_TOOLS = setOf("write", "edit", "patch")
 
+        private const val REQUEST_ATTACHMENT = 4001
+        private const val REQUEST_MIC = 4002
+
         /**
          * Open the full-screen AI workspace - the primary AI surface (the
          * bottom-panel AI tab stays available but is only half the screen).
@@ -108,10 +111,12 @@ class AiWorkspaceActivity : AppCompatActivity() {
     }
 
     private enum class Tab(val label: String, val labelKo: String) {
+        FILES("Files", "프로젝트"),
         CHAT("Chat", "채팅"),
         PLAN("Plan", "계획"),
         CHANGES("Changes", "변경"),
         SEARCH("Search", "검색"),
+        GIT("Git", "Git"),
         DIAGNOSTICS("Diagnostics", "진단"),
         TOOLS("Tools", "도구"),
         RESOURCES("Resources", "자원"),
@@ -121,9 +126,36 @@ class AiWorkspaceActivity : AppCompatActivity() {
         TERMINAL("Terminal", "터미널"),
     }
 
-    private val engine = OcEngine(this)
+    /**
+     * The five destinations of the left navigation rail (프로젝트 / 검색 / Git /
+     * AI 어시스턴트 / 설정). Several [Tab]s share one rail destination; the AI and
+     * settings destinations show a segmented sub-bar to switch between them.
+     */
+    private enum class Screen(val label: String, val labelKo: String, val icon: String) {
+        PROJECT("Files", "프로젝트", "🗂"),
+        SEARCH("Search", "검색", "🔍"),
+        GIT("Git", "Git", "⑂"),
+        AI("AI", "AI", "✦"),
+        SETTINGS("Settings", "설정", "⚙"),
+    }
+
+    private fun screenOf(tab: Tab): Screen = when (tab) {
+        Tab.FILES -> Screen.PROJECT
+        Tab.SEARCH -> Screen.SEARCH
+        Tab.GIT -> Screen.GIT
+        Tab.SETTINGS, Tab.SESSIONS, Tab.MODELS -> Screen.SETTINGS
+        else -> Screen.AI
+    }
+
+    /**
+     * Built in [onCreate], **not** as a field initializer. Activity field
+     * initializers run before the framework attaches the base context, so
+     * constructing the engine here crashed on device with
+     * `getFilesDir() on a null object reference` (OcSessionStore → OcEngine).
+     */
+    private lateinit var engine: OcEngine
+    private lateinit var validation: WorkspaceValidation
     private val settings by lazy { AiSettings(this) }
-    private val validation = WorkspaceValidation(this)
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val handler = Handler(Looper.getMainLooper())
 
@@ -141,8 +173,19 @@ class AiWorkspaceActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var projectText: TextView
     private lateinit var statusPill: TextView
-    private lateinit var tabRow: LinearLayout
+    private lateinit var railRow: LinearLayout
     private lateinit var content: FrameLayout
+    private lateinit var statusBar: TextView
+
+    // project file browser (프로젝트 rail destination)
+    private var browseDir: File? = null
+    private lateinit var filesList: LinearLayout
+
+    // git screen output
+    private lateinit var gitOutput: TextView
+
+    // composer attachments
+    private var pendingImageBase64: String? = null
 
     // chat (persistent)
     private lateinit var chatScroll: ScrollView
@@ -169,6 +212,10 @@ class AiWorkspaceActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The base context is attached by the time onCreate runs, so the
+        // engine/storage may safely touch filesDir and SharedPreferences here.
+        engine = OcEngine(this)
+        validation = WorkspaceValidation(this)
         com.aide.mobilestudio.UiTheme.resolve(this)
         setContentView(buildRoot())
 
@@ -223,12 +270,38 @@ class AiWorkspaceActivity : AppCompatActivity() {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
         root.addView(buildTopBar())
-        root.addView(buildTabStrip())
-        content = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        body.addView(buildNavRail(), LinearLayout.LayoutParams(dp(62), ViewGroup.LayoutParams.MATCH_PARENT))
+        content = FrameLayout(this).apply { setBackgroundColor(p.bg) }
+        body.addView(
+            content,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        root.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        statusBar = TextView(this).apply {
+            setTextColor(p.muted)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(4), dp(12), dp(4))
+            background = AiUiKit.rounded(p.surface, 0)
         }
-        root.addView(content)
+        root.addView(statusBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        updateStatusBar()
         return root
+    }
+
+    private fun updateStatusBar() {
+        if (!::statusBar.isInitialized) return
+        val state = when (engineState) {
+            OcEngine.AgentState.THINKING -> t("Thinking", "생각 중")
+            OcEngine.AgentState.GENERATING -> t("Writing", "작성 중")
+            OcEngine.AgentState.EXECUTING_TOOL, OcEngine.AgentState.PROCESSING_TOOL_RESULT -> t("Working", "작업 중")
+            OcEngine.AgentState.WAITING_TOOL_APPROVAL -> t("Approval", "승인 대기")
+            OcEngine.AgentState.ERROR -> t("Error", "오류")
+            OcEngine.AgentState.CANCELLED -> t("Cancelled", "취소")
+            else -> t("Ready", "준비")
+        }
+        statusBar.text = "$state  ·  ${engine.estimateTokens()} tok  ·  ${engine.currentModelLabel()}  ·  UTF-8"
     }
 
     private fun buildTopBar(): View {
@@ -243,7 +316,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         titleText = TextView(this).apply {
             text = t("AI Workspace", "AI 작업공간")
             setTextColor(p.text)
-            textSize = 17f
+            textSize = StudioUi.TypeHeading
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(10), 0, dp(8), 0)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -251,6 +324,30 @@ class AiWorkspaceActivity : AppCompatActivity() {
         projectText = AiUiKit.pill(this, "", p.surface2, p.textSoft)
         row.addView(titleText)
         row.addView(projectText)
+        // Quick navigation + build actions, as in the IDE design (검색 / 실행 / 정리).
+        row.addView(
+            AiUiKit.actionChip(this, "🔍") { _ -> showTab(Tab.SEARCH) },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(6) },
+        )
+        val runButton = AiUiKit.pill(this, "▶", AiUiKit.withAlpha(p.success, 0.85f), p.onAccent)
+        runButton.setOnClickListener { runGradleBuild() }
+        row.addView(
+            runButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(6) },
+        )
+        row.addView(
+            AiUiKit.actionChip(this, "🧹") { _ -> runGradleClean() },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(6) },
+        )
         // Persistent escape hatch on every tab: finish the workspace and drop
         // back on the editor exactly as it was. The transcript lives in the
         // session store, so reopening the workspace resumes it (see
@@ -271,7 +368,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         }
         modelText = TextView(this).apply {
             setTextColor(p.accent)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             setOnClickListener { showTab(Tab.MODELS) }
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -298,53 +395,273 @@ class AiWorkspaceActivity : AppCompatActivity() {
         statusPill.background = AiUiKit.rounded(AiUiKit.withAlpha(color, 0.15f), dp(999))
     }
 
-    private fun buildTabStrip(): View {
-        tabRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+    private fun buildNavRail(): View {
+        val p = StudioUi.palette
+        railRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = AiUiKit.rounded(p.surface, 0)
+            setPadding(dp(4), dp(10), dp(4), dp(10))
         }
-        for (tab in Tab.entries) {
-            val btn = TextView(this).apply {
-                text = t(tab.label, tab.labelKo)
-                textSize = 13f
-                setTypeface(null, Typeface.BOLD)
-                setPadding(dp(14), dp(8), dp(14), dp(8))
-                setOnClickListener { showTab(tab) }
-                tag = tab
+        for (screen in Screen.entries) {
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(2), dp(9), dp(2), dp(9))
+                tag = screen
+                setOnClickListener {
+                    when (screen) {
+                        Screen.PROJECT -> showTab(Tab.FILES)
+                        Screen.SEARCH -> showTab(Tab.SEARCH)
+                        Screen.GIT -> showTab(Tab.GIT)
+                        Screen.AI -> showTab(Tab.CHAT)
+                        Screen.SETTINGS -> showTab(Tab.SETTINGS)
+                    }
+                }
             }
-            tabRow.addView(btn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
+            item.addView(TextView(this).apply {
+                text = screen.icon
+                textSize = 16f
+                gravity = Gravity.CENTER
+            })
+            item.addView(TextView(this).apply {
+                text = t(screen.label, screen.labelKo)
+                textSize = 9f
+                gravity = Gravity.CENTER
+                setTextColor(p.textSoft)
+            })
+            railRow.addView(
+                item,
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+            )
         }
-        return HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            background = AiUiKit.rounded(StudioUi.palette.surface, 0)
-            addView(tabRow)
+        return railRow
+    }
+
+    private fun highlightRail() {
+        val p = StudioUi.palette
+        if (!::railRow.isInitialized) return
+        val active = screenOf(activeTab)
+        for (i in 0 until railRow.childCount) {
+            val item = railRow.getChildAt(i) as LinearLayout
+            val selected = item.tag == active
+            item.background = if (selected) AiUiKit.rounded(AiUiKit.withAlpha(p.accent, 0.18f), dp(10)) else null
+            (item.getChildAt(0) as TextView).setTextColor(if (selected) p.accent else p.textSoft)
+            (item.getChildAt(1) as TextView).setTextColor(if (selected) p.text else p.textSoft)
         }
+    }
+
+    private fun segmentedRow(items: List<Triple<String, Boolean, () -> Unit>>): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), dp(2), dp(10), dp(4))
+        }
+        for ((label, selected, onClick) in items) {
+            val tv = TextView(this).apply {
+                text = label
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setPadding(dp(14), dp(7), dp(14), dp(7))
+                background = AiUiKit.rippleContent(
+                    this@AiWorkspaceActivity,
+                    if (selected) StudioUi.palette.accent else StudioUi.palette.surface2,
+                    dp(999),
+                )
+                setTextColor(if (selected) StudioUi.palette.onAccent else StudioUi.palette.textSoft)
+                setOnClickListener { onClick() }
+            }
+            row.addView(
+                tv,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginEnd = dp(6) },
+            )
+        }
+        return row
+    }
+
+    private enum class AiGroup { CHAT, PLAN, PROJECT, TOOLS }
+
+    private fun aiGroupOf(tab: Tab): AiGroup = when (tab) {
+        Tab.PLAN -> AiGroup.PLAN
+        Tab.CHANGES, Tab.DIAGNOSTICS -> AiGroup.PROJECT
+        Tab.TOOLS, Tab.RESOURCES, Tab.TERMINAL -> AiGroup.TOOLS
+        else -> AiGroup.CHAT
+    }
+
+    private fun buildAiHeader(): View {
+        val p = StudioUi.palette
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(4))
+        }
+        row.addView(TextView(this).apply {
+            text = t("AI Assistant", "AI 어시스턴트")
+            setTextColor(p.text)
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        // Agent mode (build / plan / ...) — OpenCode-style agent switching.
+        val agentChip = AiUiKit.pill(this, engine.currentAgentName(), AiUiKit.withAlpha(p.accent, 0.15f), p.accent)
+        agentChip.setOnClickListener { showAgentPicker() }
+        row.addView(
+            agentChip,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(6) },
+        )
+        // On-demand conversation compaction.
+        row.addView(
+            AiUiKit.actionChip(this, t("Compact", "압축")) { _ ->
+                scope.launch {
+                    val ok = runCatching { engine.compactNow() }.getOrDefault(false)
+                    Toast.makeText(
+                        this@AiWorkspaceActivity,
+                        if (ok) t("Conversation compacted", "대화를 압축했습니다") else t("Compaction unavailable", "압축을 사용할 수 없습니다"),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(6) },
+        )
+        val modelChip = AiUiKit.pill(this, engine.currentModelLabel(), p.surface2, p.accent)
+        modelChip.setOnClickListener { showTab(Tab.MODELS) }
+        row.addView(modelChip)
+        return row
+    }
+
+    private fun showAgentPicker() {
+        val agents = runCatching { engine.listAgents() }.getOrDefault(emptyList())
+        if (agents.isEmpty()) {
+            Toast.makeText(this, t("No agents available", "사용 가능한 에이전트가 없습니다"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = agents.map { it.name }.toTypedArray()
+        val current = engine.currentAgentName()
+        AlertDialog.Builder(this)
+            .setTitle(t("Agent", "에이전트"))
+            .setSingleChoiceItems(names, names.indexOf(current)) { dialog, which ->
+                engine.setAgent(names[which])
+                dialog.dismiss()
+                showTab(Tab.CHAT)
+            }
+            .setNegativeButton(t("Cancel", "취소"), null)
+            .show()
+    }
+
+    /** AI destination: header + (채팅/계획/프로젝트/도구) segmented bar + content. */
+    private fun aiScreen(tab: Tab): View {
+        val p = StudioUi.palette
+        val group = aiGroupOf(tab)
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(p.bg)
+        }
+        column.addView(buildAiHeader())
+        column.addView(
+            segmentedRow(
+                listOf(
+                    Triple(t("Chat", "채팅"), group == AiGroup.CHAT) { showTab(Tab.CHAT) },
+                    Triple(t("Plan", "계획"), group == AiGroup.PLAN) { showTab(Tab.PLAN) },
+                    Triple(
+                        t("Project", "프로젝트"),
+                        group == AiGroup.PROJECT,
+                    ) { showTab(if (tab == Tab.DIAGNOSTICS) Tab.DIAGNOSTICS else Tab.CHANGES) },
+                    Triple(
+                        t("Tools", "도구"),
+                        group == AiGroup.TOOLS,
+                    ) { showTab(if (tab == Tab.TERMINAL) Tab.TERMINAL else Tab.TOOLS) },
+                ),
+            ),
+        )
+        when (group) {
+            AiGroup.PROJECT -> column.addView(
+                segmentedRow(
+                    listOf(
+                        Triple(t("Changes", "변경"), tab == Tab.CHANGES) { showTab(Tab.CHANGES) },
+                        Triple(t("Diagnostics", "진단"), tab == Tab.DIAGNOSTICS) { showTab(Tab.DIAGNOSTICS) },
+                    ),
+                ),
+            )
+            AiGroup.TOOLS -> column.addView(
+                segmentedRow(
+                    listOf(
+                        Triple(t("Tools", "도구"), tab == Tab.TOOLS) { showTab(Tab.TOOLS) },
+                        Triple(t("Resources", "자원"), tab == Tab.RESOURCES) { showTab(Tab.RESOURCES) },
+                        Triple(t("Terminal", "터미널"), tab == Tab.TERMINAL) { showTab(Tab.TERMINAL) },
+                    ),
+                ),
+            )
+            else -> {}
+        }
+        val frame = FrameLayout(this)
+        frame.addView(
+            when (tab) {
+                Tab.PLAN -> buildPlanTab()
+                Tab.CHANGES -> buildChangesTab()
+                Tab.DIAGNOSTICS -> buildDiagnosticsTab()
+                Tab.TOOLS -> buildToolsTab()
+                Tab.RESOURCES -> buildResourcesTab()
+                Tab.TERMINAL -> buildTerminalTab()
+                else -> chatRoot()
+            },
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        column.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        return column
+    }
+
+    /** Settings destination: (설정/세션/모델) segmented bar + content. */
+    private fun settingsScreen(tab: Tab): View {
+        val p = StudioUi.palette
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(p.bg)
+        }
+        column.addView(
+            segmentedRow(
+                listOf(
+                    Triple(t("Settings", "설정"), tab == Tab.SETTINGS) { showTab(Tab.SETTINGS) },
+                    Triple(t("Sessions", "세션"), tab == Tab.SESSIONS) { showTab(Tab.SESSIONS) },
+                    Triple(t("Models", "모델"), tab == Tab.MODELS) { showTab(Tab.MODELS) },
+                ),
+            ),
+        )
+        val frame = FrameLayout(this)
+        frame.addView(
+            when (tab) {
+                Tab.SESSIONS -> buildSessionsTab()
+                Tab.MODELS -> buildModelsTab()
+                else -> buildSettingsTab()
+            },
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        column.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        return column
     }
 
     private fun showTab(tab: Tab) {
         activeTab = tab
-        val p = StudioUi.palette
-        for (i in 0 until tabRow.childCount) {
-            val v = tabRow.getChildAt(i) as TextView
-            val selected = v.tag == tab
-            v.setTextColor(if (selected) p.onAccent else p.textSoft)
-            v.background = AiUiKit.rippleContent(this, if (selected) p.accent else p.surface2, dp(999))
-        }
+        highlightRail()
         content.removeAllViews()
-        val view = when (tab) {
-            Tab.CHAT -> chatRoot()
-            Tab.PLAN -> buildPlanTab()
-            Tab.CHANGES -> buildChangesTab()
-            Tab.SEARCH -> buildSearchTab()
-            Tab.DIAGNOSTICS -> buildDiagnosticsTab()
-            Tab.TOOLS -> buildToolsTab()
-            Tab.RESOURCES -> buildResourcesTab()
-            Tab.SESSIONS -> buildSessionsTab()
-            Tab.MODELS -> buildModelsTab()
-            Tab.SETTINGS -> buildSettingsTab()
-            Tab.TERMINAL -> buildTerminalTab()
-        }
-        content.addView(view)
+        content.addView(
+            when (screenOf(tab)) {
+                Screen.AI -> aiScreen(tab)
+                Screen.SETTINGS -> settingsScreen(tab)
+                else -> when (tab) {
+                    Tab.FILES -> buildFilesTab()
+                    Tab.GIT -> buildGitTab()
+                    else -> buildSearchTab()
+                }
+            },
+        )
+        updateStatusBar()
     }
 
     // ---------------------------------------------------------------- Chat tab
@@ -370,7 +687,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
 
         thinkingView = TextView(this).apply {
             setTextColor(p.textSoft)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             setPadding(dp(12), dp(4), dp(12), dp(4))
             visibility = View.GONE
         }
@@ -386,8 +703,64 @@ class AiWorkspaceActivity : AppCompatActivity() {
             visibility = View.GONE
         }
         chatWrapper.addView(contextBadge)
+        chatWrapper.addView(buildQuickActions())
 
         chatWrapper.addView(buildInputRow())
+    }
+
+    /**
+     * One-tap prompts under the assistant header (프로젝트 생성 / 문제 해결 /
+     * 리팩토링 / 파일 생성 / 분석 / 테스트), matching the IDE design.
+     */
+    private fun buildQuickActions(): View {
+        val actions = listOf(
+            t("Create project", "프로젝트 생성하기") to t(
+                "Create a new project here. Ask me for the details you need first.",
+                "여기에 새 프로젝트를 만들어줘. 필요한 정보를 먼저 물어봐줘.",
+            ),
+            t("Fix problems", "문제 해결하기") to t(
+                "Check the current diagnostics and fix the errors and warnings.",
+                "현재 진단 오류와 경고를 확인하고 수정해줘.",
+            ),
+            t("Refactor", "리팩토링하기") to t(
+                "Refactor this project. Propose a plan first and wait for my approval.",
+                "이 프로젝트를 리팩토링해줘. 먼저 계획을 제시하고 승인을 받은 뒤 진행해줘.",
+            ),
+            t("New file", "파일 생성하기") to t(
+                "Create a new file. Ask me what to create first.",
+                "새 파일을 만들어줘. 무엇을 만들지 먼저 물어봐줘.",
+            ),
+            t("Analyze project", "프로젝트 분석하기") to t(
+                "Analyze the project structure, dependencies and build setup, then summarise it.",
+                "프로젝트 구조, 의존성, 빌드 설정을 분석하고 요약해줘.",
+            ),
+            t("Write tests", "테스트 작성하기") to t(
+                "Write unit tests for the core code of this project.",
+                "이 프로젝트의 핵심 코드에 대한 단위 테스트를 작성해줘.",
+            ),
+        )
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        var row: LinearLayout? = null
+        for ((index, action) in actions.withIndex()) {
+            if (index % 3 == 0) {
+                row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                column.addView(
+                    row,
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+                )
+            }
+            row!!.addView(
+                AiUiKit.actionChip(this, action.first) { _ -> submit(action.second) },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { setMargins(0, dp(3), dp(6), dp(3)) },
+            )
+        }
+        return column
     }
 
     private lateinit var chatWrapper: LinearLayout
@@ -404,7 +777,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             hint = t("Ask the agent…", "에이전트에게 요청…")
             setHintTextColor(p.muted)
             setTextColor(p.text)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
             maxLines = 6
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             background = AiUiKit.rounded(p.surface2, dp(14), strokeColor = p.border, strokePx = dp(1))
@@ -434,20 +807,153 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 else send()
             }
         }
+        row.addView(
+            AiUiKit.actionChip(this, "📎") { _ -> pickAttachment() },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(4) },
+        )
+        row.addView(
+            AiUiKit.actionChip(this, "🎤") { _ -> startVoiceInput() },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(4) },
+        )
         row.addView(input)
         row.addView(sendButton, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(8) })
         return row
     }
 
     private fun send() {
-        val text = input.text?.toString()?.trim().orEmpty()
-        if (text.isEmpty()) return
-        if (text.startsWith("/") && handleSlashInput(text)) return
+        submit(input.text?.toString()?.trim().orEmpty())
+    }
+
+    /**
+     * Sends [text] (plus any pending attachment) to the engine after the local
+     * slash-command pass. Shared by the composer, quick-action chips and file
+     * actions so everything uses one entry point.
+     */
+    private fun submit(text: String) {
+        val image = pendingImageBase64
+        if (text.isBlank() && image == null) return
+        if (text.startsWith("/") && image == null && handleSlashInput(text)) return
         input.setText("")
-        addUserBubble(text)
+        pendingImageBase64 = null
+        addUserBubble(if (image != null) "🖼 " + text.ifBlank { t("(image attached)", "(이미지 첨부)") } else text)
         streamingView = null
         streamingCard = null
-        engine.sendMessage(text)
+        engine.sendMessage(
+            text.ifBlank { t("What is in this image?", "이 이미지에는 무엇이 있나요?") },
+            imageBase64 = image,
+        )
+    }
+
+    // -------------------------------------------------------- attach / voice
+
+    private fun pickAttachment() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "text/*", "application/json"))
+        }
+        runCatching { startActivityForResult(intent, REQUEST_ATTACHMENT) }
+            .onFailure {
+                Toast.makeText(this, t("No file picker available", "파일 선택기를 사용할 수 없습니다"), Toast.LENGTH_SHORT).show()
+            }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_ATTACHMENT || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        runCatching {
+            val mime = contentResolver.getType(uri).orEmpty()
+            if (mime.startsWith("image/")) {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null) {
+                    Toast.makeText(this, t("Could not read file", "파일을 읽을 수 없습니다"), Toast.LENGTH_SHORT).show()
+                    return@runCatching
+                }
+                pendingImageBase64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                Toast.makeText(this, t("Image attached", "이미지 첨부됨"), Toast.LENGTH_SHORT).show()
+            } else {
+                val text = contentResolver.openInputStream(uri)?.use { it.bufferedReader().readText() }
+                if (text == null) {
+                    Toast.makeText(this, t("Could not read file", "파일을 읽을 수 없습니다"), Toast.LENGTH_SHORT).show()
+                    return@runCatching
+                }
+                val excerpt = text.take(4000)
+                val label = uri.lastPathSegment ?: "file"
+                input.setText(
+                    input.text?.toString().orEmpty() + "\n\n" +
+                        t("[Attached $label]", "[첨부 $label]") + "\n```\n$excerpt\n```",
+                )
+                Toast.makeText(this, t("File attached", "파일 첨부됨"), Toast.LENGTH_SHORT).show()
+            }
+        }.onFailure {
+            Toast.makeText(this, t("Attach failed: ${it.message}", "첨부 실패: ${it.message}"), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startVoiceInput() {
+        val available = runCatching { android.speech.SpeechRecognizer.isRecognitionAvailable(this) }.getOrDefault(false)
+        if (!available) {
+            Toast.makeText(this, t("Speech recognition is not available", "음성 인식을 사용할 수 없습니다"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MIC)
+            return
+        }
+        listen()
+    }
+
+    private fun listen() {
+        val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+        val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().language)
+        }
+        recognizer.setRecognitionListener(object : android.speech.RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                Toast.makeText(this@AiWorkspaceActivity, t("Listening…", "듣는 중…"), Toast.LENGTH_SHORT).show()
+            }
+
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                Toast.makeText(this@AiWorkspaceActivity, t("Voice input failed", "음성 입력 실패"), Toast.LENGTH_SHORT).show()
+                recognizer.destroy()
+            }
+
+            override fun onResults(results: Bundle?) {
+                val text = results
+                    ?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull().orEmpty()
+                if (text.isNotBlank()) {
+                    input.setText(text)
+                    input.setSelection(text.length)
+                }
+                recognizer.destroy()
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        recognizer.startListening(intent)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_MIC && grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            listen()
+        }
     }
 
     /**
@@ -738,7 +1244,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         card.addView(TextView(this).apply {
             this.text = text
             setTextColor(p.onAccent)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
             setLineSpacing(dp(2).toFloat(), 1.05f)
             setTextIsSelectable(true)
         })
@@ -767,7 +1273,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         val p = StudioUi.palette
         val content = TextView(this).apply {
             setTextColor(p.text)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
             setLineSpacing(dp(3).toFloat(), 1.08f)
             setTextIsSelectable(true)
         }
@@ -826,7 +1332,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         row.addView(TextView(this).apply {
             this.text = text
             setTextColor(p.warning)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             background = AiUiKit.rounded(AiUiKit.withAlpha(p.warning, 0.12f), dp(999))
             setPadding(dp(12), dp(6), dp(12), dp(6))
         })
@@ -1028,13 +1534,13 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 this.text = header
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(StudioUi.palette.accent)
-                textSize = 12f
+                textSize = StudioUi.TypeSmall
                 setPadding(0, dp(12), 0, dp(4))
             })
             if (text.isNotEmpty()) column.addView(TextView(this).apply {
                 this.text = text
                 setTextColor(StudioUi.palette.text)
-                textSize = 14f
+                textSize = StudioUi.TypeBody
             })
             if (options == null || options.length() == 0) {
                 val et = EditText(this).apply { hint = t("Your answer", "답변 입력") }
@@ -1101,7 +1607,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 row.addView(TextView(this).apply {
                     text = "$mark  $content  ($priority)"
                     setTextColor(if (status == "completed") p.muted else p.text)
-                    textSize = 14f
+                    textSize = StudioUi.TypeBody
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 })
                 row.addView(AiUiKit.actionChip(this, t("Retry", "재시도")) { _ ->
@@ -1334,7 +1840,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             hint = t("Search file names and contents…", "파일명·내용 검색…")
             setHintTextColor(p.muted)
             setTextColor(p.text)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
             background = AiUiKit.rounded(p.surface2, dp(12), strokeColor = p.border, strokePx = dp(1))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -1382,7 +1888,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 searchResults.addView(TextView(this@AiWorkspaceActivity).apply {
                     text = "${r.file}:${r.line}  ${r.text.take(160)}"
                     setTextColor(p.info)
-                    textSize = 12f
+                    textSize = StudioUi.TypeSmall
                     typeface = Typeface.MONOSPACE
                     setPadding(0, dp(6), 0, dp(6))
                     setOnClickListener {
@@ -1456,7 +1962,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             row.addView(TextView(this).apply {
                 text = (if (d.severity.name == "ERROR") "✖ " else "⚠ ") + "${d.file}:${d.line}:${d.column}"
                 setTextColor(if (d.severity.name == "ERROR") StudioUi.palette.error else StudioUi.palette.warning)
-                textSize = 12f
+                textSize = StudioUi.TypeSmall
             })
             row.addView(TextView(this).apply {
                 text = d.message
@@ -1472,7 +1978,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 column.addView(TextView(this).apply {
                     text = "✔ ${d.file}:${d.line} ${d.message}"
                     setTextColor(StudioUi.palette.success)
-                    textSize = 12f
+                    textSize = StudioUi.TypeSmall
                 })
             }
         }
@@ -1518,6 +2024,267 @@ class AiWorkspaceActivity : AppCompatActivity() {
             }
             if (activeTab == Tab.DIAGNOSTICS) showTab(Tab.DIAGNOSTICS)
         }
+    }
+
+    // --------------------------------------------------- Files rail destination
+
+    private fun buildFilesTab(): View {
+        val p = StudioUi.palette
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(p.bg)
+        }
+        if (projectDir == null) {
+            column.addView(AiUiKit.emptyState(this, "🗂", t("No project is open.", "열린 프로젝트가 없습니다.")))
+            return column
+        }
+        if (browseDir == null || !browseDir!!.isDirectory) browseDir = projectDir
+        val crumbs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(6))
+        }
+        if (browseDir != projectDir) {
+            crumbs.addView(
+                AiUiKit.actionChip(this, "‹ ${t("Up", "위로")}") { _ ->
+                    browseDir = browseDir?.parentFile ?: projectDir
+                    renderFiles()
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginEnd = dp(8) },
+            )
+        }
+        crumbs.addView(TextView(this).apply {
+            text = relativePath(browseDir!!.absolutePath).ifEmpty { "." }
+            setTextColor(p.textSoft)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        column.addView(crumbs)
+        filesList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(0), dp(8), dp(12))
+        }
+        column.addView(
+            ScrollView(this).apply { addView(filesList) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+        )
+        renderFiles()
+        return column
+    }
+
+    private fun renderFiles() {
+        if (!::filesList.isInitialized) return
+        filesList.removeAllViews()
+        val dir = browseDir ?: return
+        val entries = dir.listFiles()
+            ?.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name.lowercase() })
+            ?.take(300)
+            .orEmpty()
+        if (entries.isEmpty()) {
+            filesList.addView(AiUiKit.emptyState(this, "📭", t("Empty folder.", "빈 폴더입니다.")))
+            return
+        }
+        for (entry in entries) {
+            val isDir = entry.isDirectory
+            val icon = when {
+                isDir -> "📁"
+                entry.extension.lowercase() in setOf("kt", "kts") -> "🄺"
+                entry.extension.lowercase() == "java" -> "☕"
+                entry.extension.lowercase() in setOf("xml") -> "📄"
+                entry.extension.lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif") -> "🖼"
+                else -> "📄"
+            }
+            filesList.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(8), dp(9), dp(8), dp(9))
+                    background = AiUiKit.rippleContent(this@AiWorkspaceActivity, StudioUi.palette.surface, dp(8))
+                    setOnClickListener {
+                        if (isDir) {
+                            browseDir = entry
+                            renderFiles()
+                        } else {
+                            showFileActions(entry)
+                        }
+                    }
+                    addView(TextView(this@AiWorkspaceActivity).apply {
+                        text = icon
+                        textSize = 13f
+                    })
+                    addView(TextView(this@AiWorkspaceActivity).apply {
+                        text = entry.name + if (isDir) "/" else ""
+                        setTextColor(if (isDir) StudioUi.palette.text else StudioUi.palette.textSoft)
+                        textSize = 13f
+                        setPadding(dp(8), 0, 0, 0)
+                        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    })
+                    addView(TextView(this@AiWorkspaceActivity).apply {
+                        text = if (isDir) "" else formatBytes(entry.length())
+                        setTextColor(StudioUi.palette.muted)
+                        textSize = 10f
+                    })
+                },
+            )
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1L shl 20 -> "%.1f MB".format(Locale.US, bytes.toDouble() / (1L shl 20))
+        bytes >= 1L shl 10 -> "%.0f KB".format(Locale.US, bytes.toDouble() / (1L shl 10))
+        else -> "$bytes B"
+    }
+
+    private fun showFileActions(file: File) {
+        val actions = arrayOf(
+            t("Preview", "미리보기"),
+            t("Ask AI to explain", "AI에게 설명 요청"),
+            t("Ask AI to change", "AI에게 수정 요청"),
+            t("Open in editor", "편집기에서 열기"),
+        )
+        AlertDialog.Builder(this)
+            .setTitle(file.name)
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> previewFile(file)
+                    1 -> {
+                        showTab(Tab.CHAT)
+                        submit(
+                            t(
+                                "Read ${relativePath(file.absolutePath)} and explain what it does.",
+                                "${relativePath(file.absolutePath)} 파일을 읽고 어떤 역할을 하는지 설명해줘.",
+                            ),
+                        )
+                    }
+                    2 -> {
+                        showTab(Tab.CHAT)
+                        // Prefill instead of sending: the user still needs to
+                        // describe what to change.
+                        input.setText(
+                            t(
+                                "Change ${relativePath(file.absolutePath)} as follows: ",
+                                "${relativePath(file.absolutePath)} 파일을 다음과 같이 수정해줘: ",
+                            ),
+                        )
+                        input.requestFocus()
+                    }
+                    3 -> openInEditor(file.absolutePath)
+                }
+            }
+            .show()
+    }
+
+    private fun previewFile(file: File) {
+        val content = runCatching { file.readText() }.getOrNull()
+        if (content == null) {
+            Toast.makeText(this, t("Cannot read file (binary?)", "파일을 읽을 수 없습니다(바이너리?)"), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val lines = content.lineSequence().take(200).toList()
+        val body = lines.joinToString("\n") + if (content.lines().size > 200) "\n… (+more)" else ""
+        AlertDialog.Builder(this)
+            .setTitle(file.name)
+            .setMessage(body)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    // ----------------------------------------------------- Git rail destination
+
+    private fun buildGitTab(): View {
+        val p = StudioUi.palette
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(p.bg)
+        }
+        if (projectDir == null) {
+            column.addView(AiUiKit.emptyState(this, "⑂", t("No project is open.", "열린 프로젝트가 없습니다.")))
+            return column
+        }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), dp(10), dp(10), dp(4))
+        }
+        fun gitChip(label: String, args: String) {
+            actions.addView(
+                AiUiKit.actionChip(this, label) { _ -> runGit(args) },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginEnd = dp(6) },
+            )
+        }
+        gitChip(t("Status", "상태"), "status --short --branch")
+        gitChip(t("Log", "로그"), "log --oneline -15")
+        gitChip(t("Diff", "변경"), "diff --stat")
+        gitChip(t("Branch", "브랜치"), "branch --show-current")
+        column.addView(actions)
+        gitOutput = TextView(this).apply {
+            setTextColor(p.text)
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(8), dp(12), dp(12))
+            setTextIsSelectable(true)
+            text = t("Run a git command to see output.", "git 명령을 실행하면 결과가 표시됩니다.")
+        }
+        column.addView(
+            ScrollView(this).apply { addView(gitOutput) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f),
+        )
+        return column
+    }
+
+    private fun runGit(args: String) {
+        val dir = projectDir ?: return
+        if (!::gitOutput.isInitialized) return
+        gitOutput.text = "git $args\n" + t("Running…", "실행 중…")
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val env = runCatching { ShellEnvironment.buildToolEnvironment(this@AiWorkspaceActivity, dir) }.getOrDefault(emptyMap())
+                val lines = mutableListOf<String>()
+                val run = runCatching {
+                    ShellRunner.runSh(this@AiWorkspaceActivity, "git $args", dir, env, 60_000) { line -> lines.add(line) }
+                }.getOrNull()
+                (lines.joinToString("\n")) to (run?.exitCode ?: -1)
+            }
+            val (output, exit) = result
+            gitOutput.text = "git $args\n" +
+                (output.ifBlank { t("(no output)", "(출력 없음)") }) +
+                "\n\n[${t("exit", "종료")} $exit]"
+        }
+    }
+
+    // ----------------------------------------------------- build (실행 / 정리)
+
+    private fun runGradleBuild() {
+        val dir = projectDir
+        if (dir == null) {
+            Toast.makeText(this, t("No project is open.", "열린 프로젝트가 없습니다."), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val gradlew = File(dir, "gradlew").isFile
+        runBuildCommand(if (gradlew) "./gradlew assembleDebug" else "gradle assembleDebug")
+    }
+
+    private fun runGradleClean() {
+        val dir = projectDir
+        if (dir == null) {
+            Toast.makeText(this, t("No project is open.", "열린 프로젝트가 없습니다."), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val gradlew = File(dir, "gradlew").isFile
+        runBuildCommand(if (gradlew) "./gradlew clean" else "gradle clean")
+    }
+
+    private fun runBuildCommand(command: String) {
+        showTab(Tab.TERMINAL)
+        if (!::terminalInput.isInitialized) return
+        terminalInput.setText(command)
+        runTerminalCommand()
     }
 
     // ------------------------------------------------------------- Tools tab
@@ -1660,7 +2427,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             row.addView(TextView(this).apply {
                 text = (if (current) "● " else "") + s.title
                 setTextColor(if (current) StudioUi.palette.accent else StudioUi.palette.text)
-                textSize = 14f
+                textSize = StudioUi.TypeBody
             })
             row.addView(TextView(this).apply {
                 text = "${s.agent} · ${fmt.format(Date(s.timeUpdated))}" + if (s.archived) " · archived" else ""
@@ -1758,7 +2525,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             if (models.isEmpty()) {
                 column.addView(TextView(this).apply {
                     text = t("No models / API key missing", "모델 없음 / API 키 필요")
-                    setTextColor(p.muted); textSize = 12f
+                    setTextColor(p.muted); textSize = StudioUi.TypeSmall
                 })
             } else {
                 for (m in models) {
@@ -1924,7 +2691,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                     column.addView(TextView(this).apply {
                         text = "${spec.displayName} — " + if (caps.compile.available) "compile: ${caps.compile.tool}" else "compile: unavailable"
                         setTextColor(if (caps.compile.available) StudioUi.palette.success else StudioUi.palette.textSoft)
-                        textSize = 12f
+                        textSize = StudioUi.TypeSmall
                         setPadding(0, dp(3), 0, dp(3))
                     })
                 }
@@ -1938,7 +2705,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             column.addView(TextView(this).apply {
                 text = (if (available) "✔ " else "· ") + spec.command + "  (" + spec.languageIds.joinToString(", ") + ")"
                 setTextColor(if (available) StudioUi.palette.success else StudioUi.palette.muted)
-                textSize = 12f
+                textSize = StudioUi.TypeSmall
                 setPadding(0, dp(3), 0, dp(3))
             })
         }
@@ -1998,7 +2765,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         val commandField = EditText(this).apply {
             hint = t("Command (e.g. npx -y @modelcontextprotocol/server-filesystem /sdcard)", "명령 (예: npx -y @modelcontextprotocol/server-filesystem /sdcard)")
             typeface = Typeface.MONOSPACE
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
         }
         column.addView(label(t("Name", "이름")))
         column.addView(nameField)
@@ -2026,7 +2793,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
             setText(value)
             setTextColor(StudioUi.palette.text)
             setHintTextColor(StudioUi.palette.muted)
-            textSize = 14f
+            textSize = StudioUi.TypeBody
             if (secret) inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         return hintText to et
@@ -2049,7 +2816,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         val wrapper = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         terminalOutput = TextView(this).apply {
             setTextColor(p.text)
-            textSize = 12f
+            textSize = StudioUi.TypeSmall
             typeface = Typeface.MONOSPACE
             setPadding(dp(10), dp(10), dp(10), dp(10))
         }
