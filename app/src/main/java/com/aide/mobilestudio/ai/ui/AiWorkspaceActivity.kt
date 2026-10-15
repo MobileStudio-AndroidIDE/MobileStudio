@@ -223,6 +223,17 @@ class AiWorkspaceActivity : AppCompatActivity() {
         currentFile = intent.getStringExtra(EXTRA_CURRENT_FILE)?.let { File(it) }?.takeIf { it.isFile }
         engine.projectDir = projectDir
         engine.reloadConfig()
+        // The composer belongs to the chat screen and is built lazily by
+        // chatRoot() the first time that screen is shown - which happens well
+        // after this point. The engine reports its state the instant a session
+        // is loaded, though, and loadSession calls back synchronously, from
+        // inside resumeLatestSessionOrStartNew() below. That first report
+        // therefore landed on a composer that did not exist yet and threw
+        // UninitializedPropertyAccessException on sendButton, killing the
+        // workspace on every launch that had a stored session to resume. Build
+        // the chat views now: chatRoot() reuses them, so the screen switch
+        // later on is unchanged.
+        buildChatViews()
         setupEngine()
         resumeLatestSessionOrStartNew()
         renderSessionHistory()
