@@ -192,6 +192,11 @@
             android:windowSoftInputMode="adjustResize" />
 
         <activity
+            android:name=".Win64ManagerActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified" />
+
+        <activity
             android:name=".ai.AiActivity"
             android:exported="false"
             android:screenOrientation="unspecified"
