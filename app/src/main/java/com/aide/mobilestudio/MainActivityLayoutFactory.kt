@@ -547,6 +547,7 @@ private fun Context.buildSideRail(): View {
         Triple(R.id.side_item_shell, ">_", "터미널" to "Terminal"),
         Triple(R.id.side_item_chat, "💬", "Chat" to "Chat"),
         Triple(R.id.side_item_ai, "✦", "AI" to "AI"),
+        Triple(R.id.side_item_extensions, "🧩", "확장" to "Extensions"),
         Triple(R.id.side_item_settings, "⚙", "설정" to "Settings"),
     )
     return LinearLayout(this).apply {

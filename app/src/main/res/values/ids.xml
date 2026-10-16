@@ -240,6 +240,7 @@
     <item name="side_item_shell" type="id" />
     <item name="side_item_chat" type="id" />
     <item name="side_item_ai" type="id" />
+    <item name="side_item_extensions" type="id" />
     <item name="side_item_settings" type="id" />
     <item name="win64_status_column" type="id" />
     <item name="win64_console" type="id" />

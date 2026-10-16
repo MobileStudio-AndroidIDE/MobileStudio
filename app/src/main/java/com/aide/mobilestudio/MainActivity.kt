@@ -484,9 +484,13 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
                     type = TutorialGuide.StepType.INTERACTIVE
                 ),
                 TutorialGuide.Step(
-                    targetView = { findViewById(R.id.menu_view) },
+                    // The View menu lost its own row in the toolbar redesign and
+                    // hangs off the hamburger now, so that is what the step has
+                    // to point at - pointing at a view that is no longer in the
+                    // tree handed the guide a null and took the step down.
+                    targetView = { findViewById(R.id.btn_menu) },
                     title = if (isKo) "파일 트리/메뉴 열기" else "File Tree / Menu",
-                    description = if (isKo) "왼쪽 가장자리 스와이프 또는 View > Explorer 로 파일 트리를 엽니다. 검색도 가능." else "Swipe from left edge or open View > Explorer to open the file tree. Search supported.",
+                    description = if (isKo) "왼쪽 가장자리 스와이프 또는 메뉴 > View > Explorer 로 파일 트리를 엽니다. 검색도 가능." else "Swipe from left edge or open Menu > View > Explorer to open the file tree. Search supported.",
                     position = TutorialGuide.TooltipPosition.RIGHT,
                     type = TutorialGuide.StepType.INTERACTIVE
                 ),
@@ -1561,6 +1565,9 @@ Long press: Toggle Shell panel"""
             R.id.side_item_shell to { showBottomPanel(); switchToPanel("shell") },
             R.id.side_item_chat to { showBottomPanel(); switchToPanel("ai") },
             R.id.side_item_ai to { openAiWorkspace() },
+            R.id.side_item_extensions to {
+                startActivity(android.content.Intent(this, com.aide.mobilestudio.extension.ExtensionManagerActivity::class.java))
+            },
             R.id.side_item_settings to { showSettingsDialog() },
         )
         bindings.forEach { (viewId, action) ->
@@ -1636,6 +1643,13 @@ Long press: Toggle Shell panel"""
         ui("Run") to { showRunMenu() },
         ui("Tools") to { showToolsMenu() },
         ui("IDE") to { showIdeMenu() },
+        // Extensions sat in the old top text row between Community and IDE.
+        // Collapsing that row into this menu dropped it, which left the
+        // extension manager reachable only from a crash dialog - the only way
+        // in was a path taken after something had already failed.
+        ui("Extensions") to {
+            startActivity(android.content.Intent(this, com.aide.mobilestudio.extension.ExtensionManagerActivity::class.java))
+        },
         ui("Community") to { HtmlViewerActivity.openAsset(this, "index.html", "MobileStudio") }
     ))
 
@@ -4916,7 +4930,11 @@ Long press: Toggle Shell panel"""
 
         fun selectTab(active: TextView) {
             val color = tabColors[active.id] ?: "#61AFEF"
-            listOf(tabBuild, tabLogcat, tabProblems, tabSearch, tabShell, tabAi).forEach { tab ->
+            // listOF, not listOF: search and AI now live on the left rail, so
+            // their tabs are absent from the row and findViewById hands back
+            // null for them. One missing tab used to take the whole activity
+            // down with it.
+            listOfNotNull(tabBuild, tabLogcat, tabProblems, tabSearch, tabShell, tabAi).forEach { tab ->
                 if (tab.id == active.id) {
                     if (StudioUi.shouldAnimate(this@MainActivity)) {
                         val fromColor = tab.currentTextColor
@@ -4995,16 +5013,24 @@ Long press: Toggle Shell panel"""
             copyProblemsToClipboard()
             true
         }
-        tabSearch.setOnClickListener { selectTab(tabSearch); switchToPanel("search"); setupSearchPanel() }
+        tabSearch?.apply {
+            setOnClickListener {
+                selectTab(this)
+                switchToPanel("search")
+                setupSearchPanel()
+            }
+        }
         tabShell.setOnClickListener {
             selectTab(tabShell)
             switchToPanel("shell")
             terminalTabManager?.scrollToBottom()
         }
-        
-        tabAi.setOnClickListener {
-            selectTab(tabAi)
-            switchToPanel("ai")
+
+        tabAi?.apply {
+            setOnClickListener {
+                selectTab(this)
+                switchToPanel("ai")
+            }
         }
         buildOutput.setOnLongClickListener {
             showOutputFullscreen(AppLanguage.literal(this, "Build Output"), buildOutput.currentText())
@@ -7365,10 +7391,9 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             currentProjectKind == ProjectKind.GAME -> ui("Build APK")
             else -> ui("Build")
         }
-        findViewById<TextView>(R.id.tab_logcat).text = if (isPython) ui("Outputs") else ui("Logcat")
-        findViewById<TextView>(R.id.tab_problems).text = ui("Problems")
-        findViewById<TextView>(R.id.tab_search).text = ui("Search")
-        findViewById<TextView>(R.id.tab_shell).text = ui("Shell")
+        findViewById<TextView>(R.id.tab_logcat)?.text = if (isPython) ui("Outputs") else ui("Logcat")
+        findViewById<TextView>(R.id.tab_problems)?.text = ui("Problems")
+        findViewById<TextView>(R.id.tab_shell)?.text = ui("Shell")
         tvStatusLang.text = when (currentProjectKind) {
             ProjectKind.PYTHON -> "Python"
             ProjectKind.JAR -> "Java/JAR"
