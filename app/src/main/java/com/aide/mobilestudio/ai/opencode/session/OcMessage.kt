@@ -158,7 +158,7 @@ object OcMessage {
         return result
     }
 
-    fun estimateTokens(value: String): Int = Math.max(0, Math.round(value.length / 4.0)).toInt()
+    fun estimateTokens(value: String): Int = OcTokenEstimate.tokens(value)
 
-    fun estimateTokens(value: Any): Int = estimateTokens(value.toString())
+    fun estimateTokens(value: Any): Int = OcTokenEstimate.tokens(value)
 }

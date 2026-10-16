@@ -1,6 +1,7 @@
 package com.aide.mobilestudio.ai.opencode.agent
 
 import android.content.Context
+import android.util.Log
 import com.aide.mobilestudio.ai.AiSettings
 import com.aide.mobilestudio.ai.agent.CheckpointFileDelta
 import com.aide.mobilestudio.ai.agent.CheckpointOutcome
@@ -19,6 +20,7 @@ import com.aide.mobilestudio.ai.opencode.provider.OcModelInfo
 import com.aide.mobilestudio.ai.opencode.provider.OcModelRef
 import com.aide.mobilestudio.ai.opencode.provider.OcProviderRegistry
 import com.aide.mobilestudio.ai.opencode.session.OcCompaction
+import com.aide.mobilestudio.ai.opencode.session.OcContextBudget
 import com.aide.mobilestudio.ai.opencode.session.OcInstructions
 import com.aide.mobilestudio.ai.opencode.session.OcMessage
 import com.aide.mobilestudio.ai.opencode.session.OcSessionStore
@@ -34,6 +36,26 @@ import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+
+/**
+ * Below this window the full session prompt and every tool schema do not fit
+ * together, so both are trimmed. A frontier model has room for both; a local
+ * one running with 4096 tokens does not, and was being handed over seven
+ * thousand tokens of fixed overhead before a single message was added.
+ */
+private const val SMALL_CONTEXT_LIMIT = 8_192
+
+/**
+ * Tools kept when the schema budget runs out, most useful first.
+ *
+ * Everything that reads, edits or runs code comes before the planning and web
+ * tools, so a small window spends what it has on the work rather than on
+ * describing the work. The order decides what survives.
+ */
+private val SMALL_CONTEXT_TOOL_ORDER = listOf(
+    "read", "edit", "write", "bash", "grep", "glob", "patch",
+    "todowrite", "question", "skill", "websearch", "webfetch", "task",
+)
 
 class OcEngine(private val context: Context) : EngineBridge {
 
@@ -533,9 +555,15 @@ class OcEngine(private val context: Context) : EngineBridge {
             }
             val systemText = buildSystemPrompt(agent, model, session)
             val messages = store.messages(session)
+            val visible = visibleTools(agent)
+            val toolDefs = toolDefinitionsFor(model, visible, ctx)
             if (!didCompact && config.compactionAuto() && messages.count { OcMessage.isUser(it) } >= 2) {
                 if (OcCompaction.compactIfNeeded(
-                        messages, systemText, "{}", config.compaction, true,
+                        // The tool schemas ship with every request but were
+                        // quoted as "{}" here, so a small-window model could be
+                        // handed more tool JSON than it can hold while the
+                        // budget still looked comfortable.
+                        messages, systemText, toolDefs.toString(), config.compaction, true,
                         model.contextLimit, null, model.outputLimit, config.compactionReserved(),
                     )
                 ) {
@@ -546,8 +574,25 @@ class OcEngine(private val context: Context) : EngineBridge {
                 }
             }
             val history = buildHistory(session, systemText, messages)
-            val visible = visibleTools(agent)
-            val toolDefs = toolRegistry.definitions(visible, ctx)
+            // Where the prompt budget actually goes. These are estimates, and
+            // are labelled as such: the only exact count lives inside the
+            // provider's tokenizer and never comes back out.
+            val budget = OcContextBudget.of(
+                contextTokens = model.contextLimit,
+                modelMaxTokens = model.maxContext,
+                declaredOutput = model.outputLimit,
+                configuredReserve = config.compactionReserved(),
+                systemText = systemText,
+                toolsJson = toolDefs.toString(),
+                historyText = history.toString(),
+            )
+            Log.i("OcPromptBudget", budget.describe() + " tools=${toolDefs.length()} msgs=${messages.size}")
+            if (!budget.fits) {
+                // Recoverable: the provider trims the history to fit before it
+                // sends. Logged so an overflow can be diagnosed from a report
+                // instead of only reproduced.
+                Log.w("OcPromptBudget", "Request over the window by ~${budget.overByTokens} tokens")
+            }
             val provider = providerRegistry.createProvider(model.ref, runtimeOptions)
             if (provider == null) {
                 listener?.onError("Unable to create provider for ${model.ref}")
@@ -736,6 +781,48 @@ class OcEngine(private val context: Context) : EngineBridge {
             }
         }
         return arr
+    }
+
+    /**
+     * Tool schemas that fit inside the model's window.
+     *
+     * The definitions ship with every request and compaction cannot shrink
+     * them, so on a small-window model they are fixed overhead that can eat
+     * the whole context before a single message is added - measured at over
+     * twenty thousand bytes for the full set, against a 4096-token window.
+     * When that happens the peripheral tools give way to the ones that read,
+     * edit and run code, taken in that order until the budget is spent. A
+     * window large enough for everything keeps everything.
+     */
+    private fun toolDefinitionsFor(model: OcModelInfo, visible: Set<String>, ctx: ToolContext): JSONArray {
+        // Below the small-window threshold the full descriptions cost more than
+        // the schemas they explain, so each tool ships as its opening sentence.
+        val compact = model.contextLimit <= SMALL_CONTEXT_LIMIT
+        val all = toolRegistry.definitions(visible, ctx, compact)
+        val reserve = OcContextBudget.outputReserve(
+            model.contextLimit, model.outputLimit, config.compactionReserved(),
+        )
+        // Schemas ride along on every request and compaction cannot shrink them,
+        // so they get half the input budget; the rest has to hold the system
+        // prompt and the conversation itself.
+        val budgetChars = ((model.contextLimit - reserve).coerceAtLeast(0) / 2) *
+            OcContextBudget.CHARS_PER_TOKEN
+        if (all.toString().length <= budgetChars) return all
+        val byName = mutableMapOf<String, JSONObject>()
+        for (i in 0 until all.length()) {
+            val def = all.optJSONObject(i) ?: continue
+            byName[def.optString("name")] = def
+        }
+        val kept = JSONArray()
+        var used = 0
+        for (name in SMALL_CONTEXT_TOOL_ORDER) {
+            val def = byName[name] ?: continue
+            val size = def.toString().length
+            if (used + size > budgetChars) break
+            kept.put(def)
+            used += size
+        }
+        return if (kept.length() > 0) kept else all
     }
 
     private fun visibleTools(agent: OcAgent): Set<String> {
@@ -1148,10 +1235,15 @@ class OcEngine(private val context: Context) : EngineBridge {
     private fun modelSystemPrompt(model: OcModelInfo): String {
         val id = model.ref.modelID.lowercase()
         val file = when {
+            // The full session prompt is written for a frontier window and
+            // costs over two thousand tokens before a single message is
+            // added - half of a local model's 4096. Small windows get the
+            // condensed prompt, which keeps the behavioural rules and drops
+            // the worked examples.
+            model.contextLimit <= SMALL_CONTEXT_LIMIT -> "ai/prompt/session/compact.txt"
             id.contains("claude") -> "ai/prompt/session/anthropic.txt"
             id.contains("gemini") -> "ai/prompt/session/gemini.txt"
             id.contains("gpt") || id.contains("o1") || id.contains("o3") -> "ai/prompt/session/gpt.txt"
-            id.contains("llama") || id.contains("local") -> "ai/prompt/session/default.txt"
             else -> "ai/prompt/session/default.txt"
         }
         return OcAssets.read(context, file) ?: OcAssets.read(context, "ai/prompt/session/default.txt")

@@ -6,7 +6,7 @@ import com.aide.mobilestudio.ai.api.AIProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.flowOn
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -42,89 +42,87 @@ class OcAnthropicProvider(
             if (tools != null && tools.length() > 0) put("tools", convertTools(tools))
         }
 
-        withContext(Dispatchers.IO) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json")
-                    setRequestProperty("x-api-key", apiKey)
-                    setRequestProperty("anthropic-version", "2023-06-01")
-                    doOutput = true
-                    connect()
-                }
-                OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
-
-                val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                var currentEvent = ""
-                var toolName = ""
-                var toolId = ""
-                val toolInput = StringBuilder()
-                var inTool = false
-                var line: String? = null
-
-                while (reader.readLine()?.also { line = it } != null) {
-                    val l = line ?: continue
-                    if (l.startsWith("event: ")) {
-                        currentEvent = l.substring(7).trim()
-                        continue
-                    }
-                    if (!l.startsWith("data: ")) continue
-                    val json = runCatching { JSONObject(l.substring(6)) }.getOrNull() ?: continue
-                    when (currentEvent) {
-                        "content_block_start" -> {
-                            val block = json.optJSONObject("content_block") ?: continue
-                            if (block.optString("type") == "tool_use") {
-                                inTool = true
-                                toolId = block.optString("id")
-                                toolName = block.optString("name")
-                                toolInput.setLength(0)
-                            }
-                        }
-                        "content_block_delta" -> {
-                            val delta = json.optJSONObject("delta") ?: continue
-                            when (delta.optString("type")) {
-                                "text_delta" -> {
-                                    val text = delta.optString("text")
-                                    if (text.isNotEmpty()) emit(AIProvider.StreamEvent.Text(text))
-                                }
-                                "input_json_delta" -> toolInput.append(delta.optString("partial_json"))
-                                "thinking_delta" -> {
-                                    val thinking = delta.optString("thinking")
-                                    if (thinking.isNotEmpty()) emit(AIProvider.StreamEvent.Reasoning(thinking))
-                                }
-                            }
-                        }
-                        "content_block_stop" -> {
-                            if (inTool) {
-                                inTool = false
-                                val input = runCatching { JSONObject(toolInput.toString()) }
-                                    .getOrElse { JSONObject() }
-                                emit(AIProvider.StreamEvent.ToolCall(toolName, input, toolId))
-                                toolName = ""
-                                toolId = ""
-                                toolInput.setLength(0)
-                            }
-                        }
-                        "error" -> {
-                            val err = json.optJSONObject("error")
-                            emit(
-                                AIProvider.StreamEvent.Error(
-                                    err?.optString("message") ?: "Anthropic API error",
-                                ),
-                            )
-                        }
-                    }
-                }
-                emit(AIProvider.StreamEvent.Done)
-            } catch (e: Exception) {
-                Log.e("OcAnthropicProvider", "Stream error", e)
-                emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
-            } finally {
-                conn?.disconnect()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("x-api-key", apiKey)
+                setRequestProperty("anthropic-version", "2023-06-01")
+                doOutput = true
+                connect()
             }
+            OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
+
+            val reader = BufferedReader(InputStreamReader(conn.inputStream))
+            var currentEvent = ""
+            var toolName = ""
+            var toolId = ""
+            val toolInput = StringBuilder()
+            var inTool = false
+            var line: String? = null
+
+            while (reader.readLine()?.also { line = it } != null) {
+                val l = line ?: continue
+                if (l.startsWith("event: ")) {
+                    currentEvent = l.substring(7).trim()
+                    continue
+                }
+                if (!l.startsWith("data: ")) continue
+                val json = runCatching { JSONObject(l.substring(6)) }.getOrNull() ?: continue
+                when (currentEvent) {
+                    "content_block_start" -> {
+                        val block = json.optJSONObject("content_block") ?: continue
+                        if (block.optString("type") == "tool_use") {
+                            inTool = true
+                            toolId = block.optString("id")
+                            toolName = block.optString("name")
+                            toolInput.setLength(0)
+                        }
+                    }
+                    "content_block_delta" -> {
+                        val delta = json.optJSONObject("delta") ?: continue
+                        when (delta.optString("type")) {
+                            "text_delta" -> {
+                                val text = delta.optString("text")
+                                if (text.isNotEmpty()) emit(AIProvider.StreamEvent.Text(text))
+                            }
+                            "input_json_delta" -> toolInput.append(delta.optString("partial_json"))
+                            "thinking_delta" -> {
+                                val thinking = delta.optString("thinking")
+                                if (thinking.isNotEmpty()) emit(AIProvider.StreamEvent.Reasoning(thinking))
+                            }
+                        }
+                    }
+                    "content_block_stop" -> {
+                        if (inTool) {
+                            inTool = false
+                            val input = runCatching { JSONObject(toolInput.toString()) }
+                                .getOrElse { JSONObject() }
+                            emit(AIProvider.StreamEvent.ToolCall(toolName, input, toolId))
+                            toolName = ""
+                            toolId = ""
+                            toolInput.setLength(0)
+                        }
+                    }
+                    "error" -> {
+                        val err = json.optJSONObject("error")
+                        emit(
+                            AIProvider.StreamEvent.Error(
+                                err?.optString("message") ?: "Anthropic API error",
+                            ),
+                        )
+                    }
+                }
+            }
+            emit(AIProvider.StreamEvent.Done)
+        } catch (e: Exception) {
+            Log.e("OcAnthropicProvider", "Stream error", e)
+            emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
+        } finally {
+            conn?.disconnect()
         }
-    }
+    }.flowOn(kotlinx.coroutines.Dispatchers.IO)
 
     private fun extractSystem(history: JSONArray): String? {
         var system: String? = null

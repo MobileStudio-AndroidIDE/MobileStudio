@@ -12,10 +12,32 @@ import java.io.FileInputStream
  * fabricated: if a key is absent the field is null.
  */
 object GgufInfo {
+    private const val GGUF_STRING = 8
+
     data class Info(
         val generalName: String?,
         val architecture: String?,
-        val nLayer: Int?
+        val nLayer: Int?,
+        /**
+         * The context the model itself was trained for, straight from the file.
+         *
+         * This is the model's real ceiling, as opposed to whatever window the
+         * app decides to load, and the two used to be conflated: every local
+         * model was loaded at one hard-coded size regardless of what the file
+         * declared it could do.
+         */
+        val contextLength: Int? = null,
+        val headCount: Int? = null,
+        val headCountKv: Int? = null,
+        val embeddingLength: Int? = null,
+        val keyLength: Int? = null,
+        val valueLength: Int? = null,
+        /**
+         * `general.file_type` - the ggml type ordinal the file declares for
+         * itself. Used to confirm that the quantisation in the file name is
+         * really what is inside; null when the file does not say.
+         */
+        val fileType: Int? = null,
     )
 
     fun read(file: File): Info? {
@@ -35,25 +57,61 @@ object GgufInfo {
                 var generalName: String? = null
                 var architecture: String? = null
                 var nLayer: Int? = null
+                var contextLength: Int? = null
+                var headCount: Int? = null
+                var headCountKv: Int? = null
+                var embeddingLength: Int? = null
+                var keyLength: Int? = null
+                var valueLength: Int? = null
+                var fileType: Int? = null
+
+                fun positiveInt(value: Any?): Int? = (value as? Number)?.toInt()?.takeIf { it > 0 }
 
                 for (i in 0 until kvCount) {
                     val key = readString(input) ?: return null
                     val type = readIntLe(input)
                     when {
-                        key == "general.name" && type == 8 -> generalName = readString(input)
-                        key == "general.architecture" && type == 8 -> {
-                            architecture = readString(input)
-                            val v = readValue(input, type) // consume
+                        key == "general.name" && type == GGUF_STRING -> generalName = readString(input)
+                        // The string is consumed by this branch. Reading it a
+                        // second time would desynchronise every key after it.
+                        key == "general.architecture" && type == GGUF_STRING -> architecture = readString(input)
+                        key == "general.file_type" -> fileType = (readValue(input, type) as? Number)?.toInt()
+                        // Current llama.cpp writes block_count; older files
+                        // used n_layer. Both are read, the value is consumed once.
+                        key == "$architecture.block_count" || key == "general.block_count" -> {
+                            val layers = positiveInt(readValue(input, type))
+                            if (nLayer == null) nLayer = layers
                         }
-                        key == "$architecture.n_layer" || key == "general.n_layer" -> {
-                            val v = readValue(input, type)
-                            nLayer = (v as? Number)?.toInt()
-                        }
+                        key == "$architecture.n_layer" || key == "general.n_layer" ->
+                            nLayer = positiveInt(readValue(input, type))
+                        key == "$architecture.context_length" || key == "general.context_length" ->
+                            contextLength = positiveInt(readValue(input, type))
+                        key == "$architecture.attention.head_count" ->
+                            headCount = positiveInt(readValue(input, type))
+                        key == "$architecture.attention.head_count_kv" ->
+                            headCountKv = positiveInt(readValue(input, type))
+                        key == "$architecture.embedding_length" ->
+                            embeddingLength = positiveInt(readValue(input, type))
+                        key == "$architecture.attention.key_length" ->
+                            keyLength = positiveInt(readValue(input, type))
+                        key == "$architecture.attention.value_length" ->
+                            valueLength = positiveInt(readValue(input, type))
                         else -> readValue(input, type)
                     }
-                    if (nLayer != null && generalName != null) break
+                    // Everything worth reading sits in the metadata block ahead
+                    // of the tokenizer. Stopping there avoids stepping through a
+                    // 150k-entry vocabulary one value at a time, which is what
+                    // happens on any file that does not declare a context.
+                    if (key.startsWith("tokenizer.") ||
+                        (generalName != null && architecture != null && contextLength != null && nLayer != null)
+                    ) {
+                        break
+                    }
                 }
-                Info(generalName, architecture, nLayer)
+                Info(
+                    generalName, architecture, nLayer, contextLength,
+                    headCount, headCountKv, embeddingLength, keyLength, valueLength, fileType,
+                )
             }
         } catch (e: Exception) {
             null

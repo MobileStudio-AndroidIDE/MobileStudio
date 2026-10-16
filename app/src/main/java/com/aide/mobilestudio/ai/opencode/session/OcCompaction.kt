@@ -70,9 +70,13 @@ When combining:
         outputTokenMax: Int?,
     ): Int {
         if (context == 0) return 0
-        val reserved = reservedConfig ?: minOf(COMPACTION_BUFFER, maxOutputTokens(outputTokenMax))
+        // One definition of the reserve, shared with the overflow check below.
+        // These used to disagree: compaction reserved the configured 20k while
+        // the overflow check reserved only the reply cap, so the two reported
+        // different limits for the same model.
+        val reserved = OcContextBudget.outputReserve(context, maxOutputTokens(outputTokenMax), reservedConfig)
         return if (inputLimit != null) maxOf(0, inputLimit - reserved)
-        else maxOf(0, context - maxOutputTokens(outputTokenMax))
+        else maxOf(0, context - reserved)
     }
 
     fun isOverflow(
@@ -252,7 +256,13 @@ When combining:
         val buffer = cfg?.optInt("reserved", COMPACTION_BUFFER) ?: COMPACTION_BUFFER
         val estimate = OcMessage.estimateTokens(systemText + toolsJson) +
             messages.sumOf { OcMessage.estimateTokens(serialize(it)) }
-        return estimate > context - maxOf(output, buffer)
+        // The reserve is clamped to a quarter of the window. The default is
+        // sized for a 200k frontier window; against a 4096-token local model it
+        // is bigger than the whole context, so this threshold went negative,
+        // every turn looked over budget, and the engine compacted on every
+        // message - an extra model call each time - yet still never fit.
+        val reserved = OcContextBudget.outputReserve(context, output, buffer)
+        return estimate > context - reserved
     }
 
     fun prune(store: OcSessionStore, sessionId: String, enabled: Boolean) {

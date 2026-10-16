@@ -3,6 +3,7 @@ package com.aide.mobilestudio.ai.agent
 import android.content.Context
 import android.os.StatFs
 import android.util.Log
+import com.aide.mobilestudio.ai.GgufInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -19,8 +20,31 @@ class ModelManager(private val context: Context) {
         val sizeBytes: Long = 0,
         val downloadUrl: String? = null,
         val quantization: String = "Q4_K_M",
-        val contextLength: Int = 4096
+        val contextLength: Int = 4096,
+        val contextLimit: Int? = null,
+        /**
+         * The model's own maximum context, read from the GGUF header.
+         *
+         * Null when the file does not declare one, or has not been downloaded:
+         * never a guess. [contextLength] is the window the app loads, this is
+         * what the model can actually hold, and conflating the two is how a
+         * model got loaded at a size it was never trained for.
+         */
+        val maxContext: Int? = null,
     )
+
+    /**
+     * GGUF header reads are cached for the life of the manager: listModels()
+     * runs on every request and the header does not change underneath us.
+     */
+    private val ggufCache = java.util.concurrent.ConcurrentHashMap<String, GgufInfo.Info?>()
+
+    fun ggufInfo(path: String): GgufInfo.Info? {
+        if (ggufCache.containsKey(path)) return ggufCache[path]
+        val info = runCatching { GgufInfo.read(File(path)) }.getOrNull()
+        ggufCache[path] = info
+        return info
+    }
 
     private val prefs = context.getSharedPreferences("ai_models", Context.MODE_PRIVATE)
     private val modelDir = File(context.filesDir, "AI/models").apply { mkdirs() }
@@ -108,13 +132,14 @@ class ModelManager(private val context: Context) {
                 obj.optLong("sizeBytes"),
                 obj.optString("downloadUrl"),
                 obj.optString("quantization", "Q4_K_M"),
-                obj.optInt("contextLength", 4096)
+                obj.optInt("contextLength", 4096),
+                ggufInfo(obj.getString("path"))?.contextLength,
             ))
         }
         val remote = listRemoteModels()
         remote.forEach { r ->
             if (isModelDownloaded(r) && list.none { it.id == r.id }) {
-                list.add(r)
+                list.add(r.copy(maxContext = ggufInfo(r.path)?.contextLength))
             }
         }
         return list
@@ -125,7 +150,7 @@ class ModelManager(private val context: Context) {
         val models = listModels().toMutableList()
         if (models.any { it.id == id }) return
         
-        models.add(ModelInfo(id, name, path))
+        models.add(ModelInfo(id, name, path, maxContext = ggufInfo(path)?.contextLength))
         saveModels(models)
     }
 

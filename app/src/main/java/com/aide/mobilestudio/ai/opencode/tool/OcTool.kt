@@ -62,6 +62,35 @@ interface OcTool {
     fun resourcePattern(args: JSONObject, ctx: ToolContext): String = "*"
 
     fun riskHint(args: JSONObject, ctx: ToolContext): RiskHint = RiskHint.READ_ONLY
+
+    /**
+     * A one-line version of [description] for small context windows.
+     *
+     * The full descriptions carry worked examples and edge cases meant for a
+     * frontier model, and they are re-sent on every single request. A small
+     * window cannot afford them, so it gets the opening sentence instead -
+     * enough to choose the right tool - while the parameter schema stays
+     * whole, because without it the call cannot be made at all.
+     */
+    fun shortDescription(ctx: ToolContext): String = firstSentence(description(ctx))
+}
+
+/** Length cap for [OcTool.shortDescription]; long enough to describe, short enough to afford. */
+private const val SHORT_DESCRIPTION_MAX = 200
+
+/**
+ * Collapses a description to its opening sentence.
+ *
+ * Whitespace is normalised first so multi-line descriptions do not smuggle
+ * their blank lines into the prompt, and the result is capped rather than
+ * trusted: a tool whose first sentence runs long still has to fit.
+ */
+private fun firstSentence(text: String): String {
+    val normalised = text.replace(Regex("\\s+"), " ").trim()
+    val terminator = normalised.indexOf(". ")
+    val sentence = if (terminator > 0) normalised.substring(0, terminator + 1) else normalised
+    return if (sentence.length <= SHORT_DESCRIPTION_MAX) sentence
+    else sentence.take(SHORT_DESCRIPTION_MAX).trimEnd() + "…"
 }
 
 class OcToolRegistry {
@@ -82,13 +111,20 @@ class OcToolRegistry {
 
     fun all(): List<OcTool> = tools.values.toList()
 
-    fun definitions(visible: Set<String>, ctx: ToolContext): JSONArray {
+    /**
+     * Schemas for the tools the agent may call.
+     *
+     * [compact] swaps each description for its opening sentence. The parameter
+     * schema is never shortened: a tool the model cannot call correctly is
+     * worse than a tool it never knew about.
+     */
+    fun definitions(visible: Set<String>, ctx: ToolContext, compact: Boolean = false): JSONArray {
         val result = JSONArray()
         for (tool in tools.values) {
             if (visible.contains(tool.name)) {
                 result.put(JSONObject().apply {
                     put("name", tool.name)
-                    put("description", tool.description(ctx))
+                    put("description", if (compact) tool.shortDescription(ctx) else tool.description(ctx))
                     put("parameters", tool.parameters())
                 })
             }

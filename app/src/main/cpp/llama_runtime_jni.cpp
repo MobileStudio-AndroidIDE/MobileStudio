@@ -507,10 +507,28 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeGenerate(
 
     struct timespec ts_start, ts_end;
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
-    LOGI("Decoding prompt with %d tokens (single-token path)", n_tokens);
+    // Feed the prompt in batches instead of one token per llama_decode.
+    //
+    // With n_tokens == 1 every step is also "the last token", and llama.cpp
+    // defaults a batch without a logits array to scoring only its last token -
+    // so the single-token path emitted a full vocab projection for every one
+    // of the prompt's tokens, on top of running the transformer a token at a
+    // time. Measured on-device that came to ~20 tok/s, which put an ordinary
+    // coding prompt minutes away from its first reply. A batch pays that
+    // projection once per chunk instead, and only the final chunk's last
+    // token - the last prompt token - is what sampling reads afterwards, so
+    // the result is unchanged.
+    //
+    // The chunk never exceeds the context's own batch limit: llama_decode
+    // asserts n_tokens_all <= n_batch rather than splitting the batch, so a
+    // larger chunk would abort the process.
+    const int32_t chunk_size = (int32_t)std::max<uint32_t>(1u, p_llama_n_batch(session->ctx));
+    LOGI("Decoding prompt with %d tokens (batch=%d)", n_tokens, chunk_size);
 
-    for (int32_t i = 0; i < n_tokens; i++) {
-        llama_batch batch = p_llama_batch_get_one(tokens.data() + i, 1);
+    int32_t decoded = 0;
+    for (int32_t i = 0; i < n_tokens; i += chunk_size) {
+        const int32_t chunk = std::min<int32_t>(chunk_size, n_tokens - i);
+        llama_batch batch = p_llama_batch_get_one(tokens.data() + i, chunk);
         g_abort_deadline_ms.store(now_ms() + 180000);
         int decode_res = p_llama_decode(session->ctx, batch);
         g_abort_deadline_ms.store(0);
@@ -520,10 +538,11 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeGenerate(
             if (decode_res == 1) return env->NewStringUTF("Error: KV slot full (Decode failed)");
             return env->NewStringUTF("Error: Decode failed (prompt)");
         }
-        if ((i % 128) == 0 && i > 0) {
+        decoded += chunk;
+        if (i > 0) {
             clock_gettime(CLOCK_MONOTONIC, &ts_end);
             long elapsed = (ts_end.tv_sec - ts_start.tv_sec) * 1000 + (ts_end.tv_nsec - ts_start.tv_nsec) / 1000000;
-            LOGI("Decoding prompt %d/%d tokens (elapsed: %ldms)", i, n_tokens, elapsed);
+            LOGI("Decoding prompt %d/%d tokens (elapsed: %ldms)", decoded, n_tokens, elapsed);
         }
     }
     p_llama_synchronize(session->ctx);

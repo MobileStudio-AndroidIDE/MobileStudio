@@ -5,7 +5,12 @@ import android.util.Log
 import com.aide.mobilestudio.ai.api.AIProvider
 import com.aide.mobilestudio.ai.agent.ModelManager
 import com.aide.mobilestudio.ai.opencode.config.OpencodeConfig
+import com.aide.mobilestudio.ai.opencode.session.OcContextBudget
+import com.aide.mobilestudio.ai.opencode.session.OcTokenEstimate
+import com.aide.mobilestudio.ai.opencode.session.OcToolOutput
+import com.aide.mobilestudio.ai.resource.AndroidMemoryProbe
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.flowOn
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -39,7 +44,35 @@ data class OcModelInfo(
     val reasoning: Boolean,
     val local: Boolean,
     val ggufPath: String? = null,
+    /**
+     * The largest window the model itself supports, when that is known.
+     *
+     * Separate from [contextLimit], which is the window this app will load.
+     * Null means the model never declared one - not that it has no limit.
+     */
+    val maxContext: Int? = null,
 )
+
+/**
+ * Context windows assumed when an OpenAI-compatible endpoint does not say.
+ *
+ * The hosted API really does offer 128k. A local server behind a custom base
+ * URL usually does not, and guessing wrong in the wide direction is silent
+ * right up until the server rejects the request.
+ */
+private const val OPENAI_CONTEXT_DEFAULT = 128_000
+private const val REMOTE_CONTEXT_DEFAULT = 64_000
+private const val LOCAL_CONTEXT_DEFAULT = 8_192
+
+/**
+ * Memory left untouched when sizing a local model's KV cache.
+ *
+ * The cache is not the only resident thing: the weights, the Android runtime
+ * and the rest of the app all share the same budget, and claiming the last
+ * available byte gets the process killed mid-answer.
+ */
+private const val LOCAL_MEMORY_HEADROOM_BYTES = 512L * 1024 * 1024
+private val PRIVATE_V4_PATTERN = Regex("""^172\.(1[6-9]|2\d|3[01])\.""")
 
 class OcProviderRegistry(
     private val context: Context,
@@ -82,10 +115,18 @@ class OcProviderRegistry(
             "openai" -> {
                 val settings = com.aide.mobilestudio.ai.AiSettings(context)
                 val id = settings.openaiModel
+                val context = settings.openaiContextLimit.takeIf { it > 0 }
+                    ?: inferContextLimit(settings.openaiBaseUrl)
+                // The output cap has to leave room inside the window or the
+                // compaction check (estimate > context - output) sees a
+                // threshold of zero and compacts every single turn - trading
+                // one stall for another. Hosted OpenAI is unaffected: 8192 of
+                // a 128k window already fits this rule.
+                val output = minOf(settings.openaiMaxTokens, context / 4)
                 listOf(
                     OcModelInfo(
                         OcModelRef("openai", id), "OpenAI $id",
-                        128_000, settings.openaiMaxTokens, true, false, false,
+                        context, output, true, false, false,
                     ),
                 )
             }
@@ -96,14 +137,45 @@ class OcProviderRegistry(
                     OcModelInfo(
                         OcModelRef("anthropic", id), "Claude $id",
                         200_000, 8_192, true, false, false,
+                        // Documented by the provider, so this is the model's
+                        // real ceiling rather than an inferred window.
+                        maxContext = 200_000,
                     ),
                 )
             }
-            "local" -> modelManager.listModels().map { model ->
-                OcModelInfo(
-                    OcModelRef("local", model.id), model.name,
-                    model.contextLength, null, true, false, true, model.path,
-                )
+            "local" -> {
+                // Read memory once for the whole list rather than per model.
+                val available = runCatching { AndroidMemoryProbe.snapshot(context).availableBytes }.getOrNull()
+                modelManager.listModels().map { model ->
+                    // The window is chosen per model: what the file declares it
+                    // can hold, what the app is configured to use, and what is
+                    // left of memory for a KV cache whose cost per token is
+                    // known only when the file gives up its geometry.
+                    val gguf = modelManager.ggufInfo(model.path)
+                    val headLength = OcContextBudget.headLength(
+                        keyLength = gguf?.keyLength,
+                        embeddingLength = gguf?.embeddingLength,
+                        headCount = gguf?.headCount,
+                    )
+                    val perToken = OcContextBudget.kvBytesPerToken(
+                        blockCount = gguf?.nLayer,
+                        headCountKv = gguf?.headCountKv,
+                        keyLength = headLength,
+                        valueLength = gguf?.valueLength ?: headLength,
+                    )
+                    val choice = OcContextBudget.chooseLocalContext(
+                        configured = model.contextLength,
+                        modelMax = model.maxContext,
+                        availableBytes = available,
+                        kvBytesPerToken = perToken,
+                        memoryHeadroomBytes = LOCAL_MEMORY_HEADROOM_BYTES,
+                    )
+                    OcModelInfo(
+                        OcModelRef("local", model.id), model.name,
+                        choice.tokens, null, true, false, true, model.path,
+                        maxContext = model.maxContext,
+                    )
+                }
             }
             else -> {
                 val provider = configProvider().providers[providerID] ?: return emptyList()
@@ -113,21 +185,59 @@ class OcProviderRegistry(
                 while (keys.hasNext()) {
                     val id = keys.next()
                     val model = models.getJSONObject(id)
+                    val declared = model.optJSONObject("limit")?.optInt("context", 128_000) ?: 128_000
                     out.add(
                         OcModelInfo(
                             OcModelRef(providerID, id),
                             model.optString("name", id),
-                            model.optJSONObject("limit")?.optInt("context", 128_000) ?: 128_000,
+                            declared,
                             model.optJSONObject("limit")?.let { if (it.has("output")) it.optInt("output") else null },
                             model.optBoolean("tool_call", true),
                             model.optBoolean("reasoning", false),
                             false,
+                            // Declared by the config, so it doubles as the
+                            // model's ceiling.
+                            maxContext = declared,
                         ),
                     )
                 }
                 out
             }
         }
+    }
+
+    /**
+     * Guesses the context window of an OpenAI-compatible endpoint from its
+     * base URL, for when nothing explicit is configured.
+     *
+     * The hosted API's 128k is real, but the same client also points at
+     * whatever the Base URL says, and a local server behind it - Ollama,
+     * llama.cpp, LM Studio - typically runs with 4096 or 8192. Believing 128k
+     * there meant the engine never compacted, shipped prompts far past what
+     * the server could hold (minutes of prefill on a phone-sized model), and
+     * was then refused with "Prompt exceeds context size".
+     *
+     * Private ranges get the local default, which errs small: a window that is
+     * too narrow only compacts sooner, and a small conversation compacts
+     * fast, whereas a window that is too wide is silent right up until the
+     * server rejects the request.
+     */
+    private fun inferContextLimit(baseUrl: String): Int {
+        val host = baseUrl.substringAfter("://", "")
+            .substringBefore("/")
+            .substringBefore(":")
+            .substringBefore("@")
+            .lowercase()
+        if (host.isEmpty()) return REMOTE_CONTEXT_DEFAULT
+        if (host == "api.openai.com") return OPENAI_CONTEXT_DEFAULT
+        val isPrivate = host == "localhost" ||
+            host == "127.0.0.1" ||
+            host == "0.0.0.0" ||
+            host.endsWith(".local") ||
+            host.startsWith("192.168.") ||
+            host.startsWith("10.") ||
+            PRIVATE_V4_PATTERN.containsMatchIn(host)
+        return if (isPrivate) LOCAL_CONTEXT_DEFAULT else REMOTE_CONTEXT_DEFAULT
     }
 
     fun getModel(ref: OcModelRef): OcModelInfo? {
@@ -163,6 +273,7 @@ class OcProviderRegistry(
                     name = model.name,
                     path = gguf,
                     contextLength = model.contextLimit,
+                    maxContext = model.maxContext,
                 )
                 OcLocalLlamaProvider(modelInfo)
             }
@@ -295,88 +406,86 @@ class OcGeminiProvider(
             }
         }
 
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(baseUrl).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json")
-                    doOutput = true
-                    connect()
-                }
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(baseUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                doOutput = true
+                connect()
+            }
 
-                java.io.OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
+            java.io.OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
 
-                var line: String? = null
-                var planBuffer = StringBuilder()
-                var isInPlan = false
+            var line: String? = null
+            var planBuffer = StringBuilder()
+            var isInPlan = false
 
-                val reader = BufferedReader(InputStreamReader(conn.inputStream))
-                while (reader.readLine()?.also { line = it } != null) {
-                    val currentLine = line ?: continue
-                    if (currentLine.startsWith("data: ")) {
-                        val data = currentLine.substring(6)
-                        if (data == "[DONE]") break
-                        val json = JSONObject(data)
-                        val candidates = json.optJSONArray("candidates")
-                        if (candidates != null && candidates.length() > 0) {
-                            val candidate = candidates.getJSONObject(0)
-                            val content = candidate.optJSONObject("content")
-                            val parts = content?.optJSONArray("parts")
-                            if (parts != null) {
-                                for (i in 0 until parts.length()) {
-                                    val part = parts.getJSONObject(i)
-                                    val text = part.optString("text")
-                                    if (text.isNotEmpty()) {
-                                        var remainingText = text
-                                        if (!isInPlan && remainingText.contains("<plan>")) {
-                                            val split = remainingText.split("<plan>", limit = 2)
-                                            if (split[0].isNotEmpty()) emit(AIProvider.StreamEvent.Text(split[0]))
-                                            isInPlan = true
-                                            remainingText = split[1]
-                                        }
-                                        if (isInPlan) {
-                                            if (remainingText.contains("</plan>")) {
-                                                val split = remainingText.split("</plan>", limit = 2)
-                                                planBuffer.append(split[0])
-                                                emit(AIProvider.StreamEvent.Plan(planBuffer.toString()))
-                                                isInPlan = false
-                                                planBuffer = StringBuilder()
-                                                if (split[1].isNotEmpty()) emit(AIProvider.StreamEvent.Text(split[1]))
-                                            } else {
-                                                planBuffer.append(remainingText)
-                                            }
+            val reader = BufferedReader(InputStreamReader(conn.inputStream))
+            while (reader.readLine()?.also { line = it } != null) {
+                val currentLine = line ?: continue
+                if (currentLine.startsWith("data: ")) {
+                    val data = currentLine.substring(6)
+                    if (data == "[DONE]") break
+                    val json = JSONObject(data)
+                    val candidates = json.optJSONArray("candidates")
+                    if (candidates != null && candidates.length() > 0) {
+                        val candidate = candidates.getJSONObject(0)
+                        val content = candidate.optJSONObject("content")
+                        val parts = content?.optJSONArray("parts")
+                        if (parts != null) {
+                            for (i in 0 until parts.length()) {
+                                val part = parts.getJSONObject(i)
+                                val text = part.optString("text")
+                                if (text.isNotEmpty()) {
+                                    var remainingText = text
+                                    if (!isInPlan && remainingText.contains("<plan>")) {
+                                        val split = remainingText.split("<plan>", limit = 2)
+                                        if (split[0].isNotEmpty()) emit(AIProvider.StreamEvent.Text(split[0]))
+                                        isInPlan = true
+                                        remainingText = split[1]
+                                    }
+                                    if (isInPlan) {
+                                        if (remainingText.contains("</plan>")) {
+                                            val split = remainingText.split("</plan>", limit = 2)
+                                            planBuffer.append(split[0])
+                                            emit(AIProvider.StreamEvent.Plan(planBuffer.toString()))
+                                            isInPlan = false
+                                            planBuffer = StringBuilder()
+                                            if (split[1].isNotEmpty()) emit(AIProvider.StreamEvent.Text(split[1]))
                                         } else {
-                                            emit(AIProvider.StreamEvent.Text(remainingText))
+                                            planBuffer.append(remainingText)
                                         }
+                                    } else {
+                                        emit(AIProvider.StreamEvent.Text(remainingText))
                                     }
-                                    if (part.optBoolean("thought", false) && text.isNotEmpty()) {
-                                        emit(AIProvider.StreamEvent.Reasoning(text))
-                                    }
-                                    val toolCall = part.optJSONObject("functionCall")
-                                    if (toolCall != null) {
-                                        emit(
-                                            AIProvider.StreamEvent.ToolCall(
-                                                toolCall.getString("name"),
-                                                toolCall.optJSONObject("args") ?: JSONObject(),
-                                                null,
-                                            ),
-                                        )
-                                    }
+                                }
+                                if (part.optBoolean("thought", false) && text.isNotEmpty()) {
+                                    emit(AIProvider.StreamEvent.Reasoning(text))
+                                }
+                                val toolCall = part.optJSONObject("functionCall")
+                                if (toolCall != null) {
+                                    emit(
+                                        AIProvider.StreamEvent.ToolCall(
+                                            toolCall.getString("name"),
+                                            toolCall.optJSONObject("args") ?: JSONObject(),
+                                            null,
+                                        ),
+                                    )
                                 }
                             }
                         }
                     }
                 }
-                emit(AIProvider.StreamEvent.Done)
-            } catch (e: Exception) {
-                Log.e("OcGeminiProvider", "Stream error", e)
-                emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
-            } finally {
-                conn?.disconnect()
             }
+            emit(AIProvider.StreamEvent.Done)
+        } catch (e: Exception) {
+            Log.e("OcGeminiProvider", "Stream error", e)
+            emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
+        } finally {
+            conn?.disconnect()
         }
-    }
+    }.flowOn(kotlinx.coroutines.Dispatchers.IO)
 
     private fun extractSystem(history: JSONArray): String? {
         var system: String? = null
@@ -435,70 +544,104 @@ class OcOpenAiCompatibleProvider(
             }
         }
 
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            var conn: HttpURLConnection? = null
-            try {
-                val urlStr = baseURL.trimEnd('/') + "/chat/completions"
-                conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Content-Type", "application/json")
-                    if (apiKey != null) setRequestProperty("Authorization", "Bearer $apiKey")
-                    doOutput = true
-                    connect()
-                }
+        var conn: HttpURLConnection? = null
+        try {
+            val urlStr = baseURL.trimEnd('/') + "/chat/completions"
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json")
+                if (apiKey != null) setRequestProperty("Authorization", "Bearer $apiKey")
+                doOutput = true
+                connect()
+            }
 
-                java.io.OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
+            java.io.OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
 
-                val reader = BufferedReader(InputStreamReader(conn.inputStream))
+            val responseCode = conn.responseCode
+            if (responseCode !in 200..299) {
+                val errBody = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                Log.e("OcOpenAiCompatible", "HTTP $responseCode from $urlStr: $errBody")
+                emit(AIProvider.StreamEvent.Error(httpErrorMessage(responseCode, errBody)))
+                return@flow
+            }
 
-                val toolCalls = mutableMapOf<Int, Pair<String, StringBuilder>>()
-                var line: String? = null
-                while (reader.readLine()?.also { line = it } != null) {
-                    val currentLine = line ?: continue
-                    if (!currentLine.startsWith("data: ")) continue
-                    val data = currentLine.substring(6).trim()
-                    if (data == "[DONE]") break
-                    val json = runCatching { JSONObject(data) }.getOrNull() ?: continue
-                    val choices = json.optJSONArray("choices") ?: continue
-                    if (choices.length() == 0) continue
-                    val delta = choices.getJSONObject(0).optJSONObject("delta") ?: continue
-                    val reasoning = delta.optStringOrNull("reasoning_content")
-                        ?: delta.optStringOrNull("reasoning")
-                    if (!reasoning.isNullOrEmpty()) emit(AIProvider.StreamEvent.Reasoning(reasoning))
-                    val content = delta.optStringOrNull("content")
-                    if (!content.isNullOrEmpty()) emit(AIProvider.StreamEvent.Text(content))
-                    val toolCallsArr = delta.optJSONArray("tool_calls")
-                    if (toolCallsArr != null) {
-                        for (i in 0 until toolCallsArr.length()) {
-                            val tc = toolCallsArr.getJSONObject(i)
-                            val index = tc.optInt("index", 0)
-                            val id = tc.optStringOrNull("id")
-                            val fn = tc.optJSONObject("function") ?: continue
-                            val name = fn.optStringOrNull("name") ?: ""
-                            val args = fn.optStringOrNull("arguments") ?: ""
-                            val existing = toolCalls[index]
-                            if (existing == null) {
-                                toolCalls[index] = Pair(name, StringBuilder(args))
-                                if (id != null) toolCallIds[index] = id
-                            } else {
-                                val mergedName = if (name.isNotEmpty()) name else existing.first
-                                toolCalls[index] = Pair(mergedName, existing.second.append(args))
-                            }
+            val reader = BufferedReader(InputStreamReader(conn.inputStream))
+
+            val toolCalls = mutableMapOf<Int, Pair<String, StringBuilder>>()
+            var line: String? = null
+            while (reader.readLine()?.also { line = it } != null) {
+                val currentLine = line ?: continue
+                if (!currentLine.startsWith("data: ")) continue
+                val data = currentLine.substring(6).trim()
+                if (data == "[DONE]") break
+                val json = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                val choices = json.optJSONArray("choices") ?: continue
+                if (choices.length() == 0) continue
+                val delta = choices.getJSONObject(0).optJSONObject("delta") ?: continue
+                val reasoning = delta.optStringOrNull("reasoning_content")
+                    ?: delta.optStringOrNull("reasoning")
+                if (!reasoning.isNullOrEmpty()) emit(AIProvider.StreamEvent.Reasoning(reasoning))
+                val content = delta.optStringOrNull("content")
+                if (!content.isNullOrEmpty()) emit(AIProvider.StreamEvent.Text(content))
+                val toolCallsArr = delta.optJSONArray("tool_calls")
+                if (toolCallsArr != null) {
+                    for (i in 0 until toolCallsArr.length()) {
+                        val tc = toolCallsArr.getJSONObject(i)
+                        val index = tc.optInt("index", 0)
+                        val id = tc.optStringOrNull("id")
+                        val fn = tc.optJSONObject("function") ?: continue
+                        val name = fn.optStringOrNull("name") ?: ""
+                        val args = fn.optStringOrNull("arguments") ?: ""
+                        val existing = toolCalls[index]
+                        if (existing == null) {
+                            toolCalls[index] = Pair(name, StringBuilder(args))
+                            if (id != null) toolCallIds[index] = id
+                        } else {
+                            val mergedName = if (name.isNotEmpty()) name else existing.first
+                            toolCalls[index] = Pair(mergedName, existing.second.append(args))
                         }
                     }
                 }
-                for ((index, tc) in toolCalls.toSortedMap()) {
-                    val argsJson = runCatching { JSONObject(tc.second.toString()) }.getOrDefault(JSONObject())
-                    emit(AIProvider.StreamEvent.ToolCall(tc.first, argsJson, toolCallIds[index]))
-                }
-                emit(AIProvider.StreamEvent.Done)
-            } catch (e: Exception) {
-                Log.e("OcOpenAiCompatible", "Stream error", e)
-                emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
-            } finally {
-                conn?.disconnect()
             }
+            for ((index, tc) in toolCalls.toSortedMap()) {
+                val argsJson = runCatching { JSONObject(tc.second.toString()) }.getOrDefault(JSONObject())
+                emit(AIProvider.StreamEvent.ToolCall(tc.first, argsJson, toolCallIds[index]))
+            }
+            emit(AIProvider.StreamEvent.Done)
+        } catch (e: Exception) {
+            Log.e("OcOpenAiCompatible", "Stream error", e)
+            emit(AIProvider.StreamEvent.Error(e.message ?: "Unknown error"))
+        } finally {
+            conn?.disconnect()
         }
+    }.flowOn(kotlinx.coroutines.Dispatchers.IO)
+
+    /**
+     * Turns an HTTP status + response body into a message the user can act on.
+     * NVIDIA NIM (and most OpenAI-compatible servers) reply with
+     * `{"error":{"message":...}}` or `{"detail":...}`, so surface that instead
+     * of an opaque "Cannot read from the 401 stream".
+     */
+    private fun httpErrorMessage(code: Int, body: String): String {
+        val detail = runCatching {
+            val json = JSONObject(body)
+            json.optJSONObject("error")?.optString("message")
+                ?: json.optJSONObject("error")?.optString("detail")
+                ?: json.optString("detail")
+                ?: json.optString("message")
+                ?: json.optJSONArray("errors")?.optJSONObject(0)?.optString("message")
+        }.getOrNull().orEmpty().ifBlank { body.trim().take(300) }
+
+        val hint = when (code) {
+            401 -> "Invalid or missing API key"
+            403 -> "API access denied for this key/model"
+            404 -> "Model or endpoint not found"
+            422 -> "Request rejected (unsupported parameter or model)"
+            429 -> "Rate limited - too many requests"
+            in 500..599 -> "Provider server error"
+            else -> "HTTP $code"
+        }
+        return if (detail.isNotBlank()) "$hint ($code)\n$detail" else "$hint"
     }
 
     private val toolCallIds = mutableMapOf<Int, String>()
@@ -642,7 +785,7 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                             throw IllegalStateException(bridge.lastError() ?: "runtime load failed")
                         }
                         val vulkan = bridge.isVulkanAvailable()
-                        val ctx = model.contextLength.coerceIn(512, 4096)
+                        val ctx = (model.contextLimit ?: model.contextLength).coerceIn(512, OcContextBudget.LOCAL_CONTEXT_CEILING)
                         Log.i("OcLocalLlamaProvider", "Loading model at ${model.path} (ctx=$ctx, nGpu=$nGpu, threads=$nThreads, vulkan=$vulkan)")
                         val result = bridge.loadModelWithFallback(model.path, ctx, nGpu, nThreads, vulkan)
                         activeBridge = bridge
@@ -654,8 +797,8 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                                 com.aide.mobilestudio.ai.api.LlamaAndroid.getLoadError() ?: "libllama_android.so unavailable",
                             )
                         }
-                        Log.i("OcLocalLlamaProvider", "Loading model at ${model.path} (legacy, ctx=${model.contextLength}, threads=$nThreads, backend=$backendName)")
-                        llama.loadModel(model.path, model.contextLength.coerceIn(512, 2048), 0, nThreads, backendName)
+                        Log.i("OcLocalLlamaProvider", "Loading model at ${model.path} (legacy, ctx=${model.contextLimit}, threads=$nThreads, backend=$backendName)")
+                        llama.loadModel(model.path, (model.contextLimit ?: model.contextLength).coerceIn(512, 2048), 0, nThreads, backendName)
                     }
                 }
             }
@@ -743,27 +886,36 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
     }
 
     private fun buildPrompt(history: JSONArray, tools: JSONArray?): String {
-        val sb = StringBuilder()
-        sb.append("<|im_start|>system\n")
+        val window = model.contextLength
+            .coerceIn(OcContextBudget.MIN_CONTEXT, OcContextBudget.LOCAL_CONTEXT_CEILING)
+        val reserve = OcContextBudget.outputReserve(window, null, null)
+        val toolResultChars = OcContextBudget.toolResultChars(window, reserve)
+
+        val head = StringBuilder()
+        head.append("<|im_start|>system\n")
         var first = true
         for (i in 0 until history.length()) {
             val msg = history.getJSONObject(i)
             if (msg.optString("role") == "system" && first) {
                 val parts = msg.optJSONArray("parts")
                 if (parts != null && parts.length() > 0) {
-                    sb.append(parts.getJSONObject(0).optString("text"))
+                    head.append(parts.getJSONObject(0).optString("text"))
                     first = false
                 }
             }
         }
-        if (first) sb.append("You are a professional AI Coding Agent. You have access to tools.\n")
+        if (first) head.append("You are a professional AI Coding Agent. You have access to tools.\n")
         if (tools != null && tools.length() > 0) {
-            sb.append("\nAvailable tools: ").append(tools.toString(2)).append("\n")
-            sb.append("To call a tool, use: ").append(TOOL_OPEN)
+            // Compact, not indented. These schemas are fixed overhead that
+            // every single request pays for, and pretty-printing them roughly
+            // doubles what a 4096-token window has to spend.
+            head.append("\nAvailable tools: ").append(tools.toString()).append("\n")
+            head.append("To call a tool, use: ").append(TOOL_OPEN)
                 .append("{\"name\": \"...\", \"arguments\": {...}}").append(TOOL_CLOSE).append("\n")
         }
-        sb.append("<|im_end|>\n")
+        head.append("<|im_end|>\n")
 
+        val turns = ArrayList<String>()
         for (i in 0 until history.length()) {
             val msg = history.getJSONObject(i)
             val role = msg.optString("role")
@@ -786,7 +938,11 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                             .append("{\"name\": \"").append(part.optString("tool"))
                             .append("\", \"arguments\": ").append(input.toString()).append("}").append(TOOL_CLOSE)
                         if (status == "completed") {
-                            content.append("\nTool result: ").append(state.optString("output"))
+                            // A build or a search can return thousands of
+                            // lines. The stored transcript keeps all of it -
+                            // this only bounds what the next request carries.
+                            content.append("\nTool result: ")
+                                .append(OcToolOutput.trim(state.optString("output"), toolResultChars))
                         } else if (status == "error") {
                             content.append("\nTool error: ").append(state.optString("error"))
                         }
@@ -795,10 +951,64 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
             }
             if (content.isEmpty()) continue
             val displayRole = if (role == "assistant") "assistant" else "user"
-            sb.append("<|im_start|>").append(displayRole).append("\n").append(content).append("<|im_end|>\n")
+            turns.add("<|im_start|>" + displayRole + "\n" + content + "<|im_end|>\n")
         }
+
+        // Keep the newest turns and drop the oldest whole ones, so the model
+        // never sees a tool call without its result. The whole history used to
+        // go in regardless of size, which is what pushed the prompt past the
+        // window before the model could answer a single message. Costs are
+        // estimated per turn, not counted in characters, because Korean spends
+        // several times the tokens English does for the same length.
+        val usableInput = (window - reserve).coerceAtLeast(0)
+        val budget = usableInput - OcTokenEstimate.tokens(head)
+        val kept = ArrayList<String>()
+        var used = 0
+        for (i in turns.indices.reversed()) {
+            val turn = turns[i]
+            val cost = OcTokenEstimate.tokens(turn)
+            if (used + cost > budget) {
+                if (kept.isEmpty() && budget > 0) kept.add(clipToTokenBudget(turn, budget))
+                break
+            }
+            kept.add(turn)
+            used += cost
+        }
+
+        val sb = StringBuilder(head)
+        for (i in kept.indices.reversed()) sb.append(kept[i])
         sb.append("<|im_start|>assistant\n")
-        return sb.toString()
+        val prompt = sb.toString()
+        Log.i(
+            "OcLocalLlamaProvider",
+            "Prompt " + OcContextBudget.of(
+                contextTokens = window,
+                modelMaxTokens = model.maxContext,
+                declaredOutput = null,
+                configuredReserve = null,
+                systemText = head.toString(),
+                toolsJson = tools?.toString() ?: "",
+                historyText = kept.joinToString(""),
+            ).describe() + " chars=${prompt.length}",
+        )
+        return prompt
+    }
+
+    /**
+     * Keeps the end of a turn that will not fit as a whole. The request the
+     * user just made sits at the end, so that is the part worth keeping.
+     */
+    private fun clipToTokenBudget(text: String, tokens: Int): String {
+        if (tokens <= 0) return ""
+        var chars = tokens * 4
+        if (chars >= text.length) return text
+        var tail = text.takeLast(chars)
+        while (tail.isNotEmpty() && OcTokenEstimate.tokens(tail) > tokens) {
+            chars = chars * 3 / 4
+            if (chars <= 0) return ""
+            tail = text.takeLast(chars)
+        }
+        return tail
     }
 
     override fun getCapabilities(): JSONObject = JSONObject().apply {
