@@ -18,6 +18,7 @@ import java.util.Locale
  * 규칙:
  * - 바이너리 선택은 Android 안전한 문서 선택 API(ACTION_OPEN_DOCUMENT)만 사용한다.
  * - 선택한 파일은 캐시로 복사한 뒤 분석하며, 어떤 경우에도 실행하지 않는다.
+ * - ZIP 매직이면 IPA로 간주해 앱 번들 정보와 실행 가능성을 판정한다.
  * - Mach-O 분석은 백그라운드 스레드에서만 수행한다 (UI 스레드 차단 금지).
  * - 분석 결과는 읽기 전용 정보만 표시한다.
  */
@@ -122,14 +123,97 @@ class AsterOSActivity : Activity() {
         appendLog("분석 시작: $path")
         Thread {
             val started = System.currentTimeMillis()
-            val result = MachOAnalyzer.analyze(path)
+            val isIpa = isZipFile(path)
+            val result: Any = if (isIpa) IpaInspector.inspect(path) else MachOAnalyzer.analyze(path)
             val elapsed = System.currentTimeMillis() - started
             runOnUiThread {
                 analyzing = false
                 analyzeButton.isEnabled = true
-                render(result, elapsed)
+                when (result) {
+                    is IpaResult -> renderIpa(result, elapsed)
+                    is MachOResult -> render(result, elapsed)
+                }
             }
         }.start()
+    }
+
+    /** 확장자 대신 매직으로 IPA(ZIP) 여부를 가린다 (복사 후 확장자가 없어진다). */
+    private fun isZipFile(path: String): Boolean = try {
+        java.io.RandomAccessFile(path, "r").use { raf ->
+            if (raf.length() < 4) false
+            else {
+                val b = ByteArray(4)
+                raf.readFully(b)
+                b[0] == 0x50.toByte() && b[1] == 0x4B.toByte() &&
+                    b[2] == 0x03.toByte() && b[3] == 0x04.toByte()
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun renderIpa(result: IpaResult, elapsedMs: Long) {
+        when (result) {
+            is IpaResult.Fail -> {
+                statusView.text = "IPA 열기 실패"
+                resultView.text = "IPA 열기 실패: ${result.reason}"
+                appendLog("IPA 실패: ${result.reason}")
+            }
+            is IpaResult.Success -> {
+                val info = result.info
+                val verdict = result.verdict
+                statusView.text = "IPA 분석 완료 (${elapsedMs}ms) — 실행: 불가"
+                resultView.text = buildString {
+                    appendLine("== 앱 정보 ==")
+                    info.displayName?.let { appendLine("이름: $it") }
+                    info.bundleId?.let { appendLine("번들 ID: $it") }
+                    info.version?.let { appendLine("버전: $it (${info.buildVersion ?: "?"})") }
+                    appendLine("앱 폴더: ${info.appFolderName}")
+                    info.minimumOsVersion?.let { appendLine("최소 iOS: $it") }
+                    if (info.deviceFamilies.isNotEmpty()) {
+                        val fam = info.deviceFamilies.joinToString { if (it == 1) "iPhone" else if (it == 2) "iPad" else "기기($it)" }
+                        appendLine("대상 기기: $fam")
+                    }
+                    appendLine("실행 파일: ${info.executableName}")
+                    appendLine("프레임워크: ${info.frameworks.size}개" + if (info.frameworks.isNotEmpty()) " (${info.frameworks.joinToString()})" else "")
+                    if (info.appExtensions.isNotEmpty()) {
+                        appendLine("앱 확장: ${info.appExtensions.joinToString()}")
+                    }
+                    appendLine("코드 서명: ${if (info.hasCodeSignature) "있음" else "없음"} / 프로비저닝: ${if (info.hasMobileProvision) "있음" else "없음"}")
+
+                    appendLine()
+                    appendLine("== 메인 바이너리 ==")
+                    when (val mb = result.mainBinary) {
+                        is MachOResult.Success -> {
+                            appendLine("cpu: ${mb.cputype} / filetype: ${mb.filetype} / ncmds: ${mb.ncmds}")
+                            if (mb.architectures.size > 1) {
+                                appendLine("fat architectures: ${mb.architectures.joinToString()}")
+                            }
+                            appendLine("크기: ${mb.fileSize}byte / 세그먼트 ${mb.segments.size} / dylib ${mb.dylibs.size}")
+                        }
+                        is MachOResult.Fail -> appendLine("분석 실패: ${mb.reason}")
+                        is MachOResult.NotSupported -> appendLine("형식 미지원: ${mb.reason}")
+                        null -> appendLine("(없음)")
+                    }
+
+                    appendLine()
+                    appendLine("== 실행 판정 ==")
+                    appendLine("실행 가능: 아니오" + if (verdict.cpuCompatible == true) " (CPU 구조는 일치)" else "")
+                    verdict.reasons.forEach { appendLine(" - 사유: $it") }
+                    verdict.notes.forEach { appendLine(" - 비고: $it") }
+
+                    if (info.warnings.isNotEmpty()) {
+                        appendLine()
+                        appendLine("== 경고 ==")
+                        info.warnings.forEach { appendLine(" ! $it") }
+                    }
+                }
+                appendLog(
+                    "IPA 완료: ${info.bundleId ?: "?"} / 프레임워크 ${info.frameworks.size} / " +
+                        "실행 판정 불가"
+                )
+            }
+        }
     }
 
     private fun render(result: MachOResult, elapsedMs: Long) {
