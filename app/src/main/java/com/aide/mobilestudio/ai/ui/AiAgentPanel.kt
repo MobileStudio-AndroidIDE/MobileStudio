@@ -2278,6 +2278,21 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         layout.addView(maxTokensInput)
+        layout.addView(TextView(context).apply { text = "Context Window (tokens)"; setTextColor(StudioUi.palette.muted); textSize = 11f })
+        val contextLimitInput = EditText(context).apply {
+            // Blank means "work it out from the Base URL" - hosted OpenAI gets
+            // 128k, a private address gets the local default. Set it when the
+            // server publishes a real number: Ollama and llama.cpp commonly run
+            // with 4096 or 8192, and assuming 128k there is what made requests
+            // take minutes and then come back as "Prompt exceeds context size".
+            setText(if (settings.openaiContextLimit > 0) settings.openaiContextLimit.toString() else "")
+            hint = "auto"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            textSize = 13f
+            background = StudioUi.rounded(context, fill = StudioUi.palette.surface2, stroke = StudioUi.palette.border, radiusDp = 8)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+        layout.addView(contextLimitInput)
 
         // Anthropic section
         layout.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(16)) })
@@ -2438,6 +2453,7 @@ class AiAgentPanel(context: Context) : LinearLayout(context) {
             settings.anthropicApiKey = anthropicKeyInput.text.toString().trim()
             settings.anthropicModel = anthropicModelInput.text.toString().trim().ifEmpty { "claude-sonnet-4-20250514" }
             settings.openaiMaxTokens = maxTokensInput.text.toString().toIntOrNull() ?: 8192
+            settings.openaiContextLimit = contextLimitInput.text.toString().toIntOrNull() ?: 0
             settings.autoApplyChanges = autoApplySwitch.isChecked
             settings.nThreads = threadsInput.text.toString().toIntOrNull() ?: 4
             settings.contextLength = contextInput.text.toString().toIntOrNull() ?: 4096

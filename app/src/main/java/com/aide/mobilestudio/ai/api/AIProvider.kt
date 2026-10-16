@@ -1,5 +1,6 @@
 package com.aide.mobilestudio.ai.api
 
+import com.aide.mobilestudio.ai.retry.ApiErrorInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.flow.Flow
@@ -13,7 +14,13 @@ interface AIProvider {
         data class Reasoning(val text: String) : StreamEvent()
         data class ToolCall(val name: String, val args: JSONObject, val id: String? = null) : StreamEvent()
         data class Plan(val rawPlan: String) : StreamEvent()
-        data class Error(val message: String) : StreamEvent()
+
+        /**
+         * @param info classified failure (status, kind, Retry-After, retryable).
+         *   Null only for errors the provider could not classify; the retry
+         *   engine falls back to reading [message] in that case.
+         */
+        data class Error(val message: String, val info: ApiErrorInfo? = null) : StreamEvent()
         object Done : StreamEvent()
     }
 

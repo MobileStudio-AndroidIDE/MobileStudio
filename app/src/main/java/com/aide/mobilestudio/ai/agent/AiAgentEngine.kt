@@ -323,15 +323,30 @@ class AiAgentEngine(private val context: Context) {
      * the thing that gets dropped.
      */
     private fun trimHistoryForRequest(): JSONArray {
-        if (history.toString().length <= maxRequestChars) return history
+        val count = history.length()
+        // Measure each message once, up front. Dropping from the front while
+        // re-serialising the whole array each time round the loop is
+        // quadratic - and this only ever runs when the history is *already*
+        // over budget, which is exactly when the array is at its biggest, so
+        // the cost landed on the one path that could least afford it: tens of
+        // megabytes of JSON built before a single token could go out.
+        val sizes = IntArray(count) { i -> history.optJSONObject(i)?.toString()?.length ?: 0 }
+        var total = 0
+        for (size in sizes) total += size
+        if (total <= maxRequestChars) return history
+
+        // Keep the newest turns; the current exchange is never the thing that
+        // goes, and the tail is always kept whole.
+        var first = 0
+        while (first < count - minKeptMessages && total > maxRequestChars) {
+            total -= sizes[first]
+            first++
+        }
+        if (first == 0) return history
+
+        Log.i("AiAgentEngine", "Trimmed request history $count -> ${count - first} messages")
         val trimmed = JSONArray()
-        for (i in 0 until history.length()) trimmed.put(history.get(i))
-        while (trimmed.length() > minKeptMessages && trimmed.toString().length > maxRequestChars) {
-            trimmed.remove(0)
-        }
-        if (trimmed.length() < history.length()) {
-            Log.i("AiAgentEngine", "Trimmed request history ${history.length()} -> ${trimmed.length()} messages")
-        }
+        for (i in first until count) trimmed.put(history.get(i))
         return trimmed
     }
 
