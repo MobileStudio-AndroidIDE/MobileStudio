@@ -235,6 +235,12 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <activity
+            android:name=".asteros.AsterOSActivity"
+            android:exported="false"
+            android:label="AsterOS"
+            android:theme="@style/Theme.MobileStudio.Inner"/>
+
         <receiver
             android:name=".PermissionActionReceiver"
             android:exported="false" />

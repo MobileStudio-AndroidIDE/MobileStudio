@@ -70,4 +70,9 @@
     <style name="MsDialogButton.Neutral" parent="Widget.Material3.Button.TextButton">
         <item name="android:textColor">#F85149</item>
     </style>
+
+    <style name="Theme.MobileStudio.Inner" parent="Theme.MobileStudio">
+        <!-- Inner theme for embedded activities like AsterOS -->
+        <!-- necessary items can be overridden here -->
+    </style>
 </resources>
