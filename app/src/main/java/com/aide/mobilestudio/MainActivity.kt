@@ -1697,6 +1697,11 @@ Long press: Toggle Shell panel"""
     private fun showToolsMenu() = showTextMenu(ui("Tools"), listOf(
         ui("Open Build Tools") to { ToolsActivity.start(this) },
         ui("Wine & Box64") to { Win64ManagerActivity.start(this) },
+        // The analyzer has no other way in: it is not exported and nothing in
+        // the app referenced it, so the screen existed but no one could open it.
+        ui("Mach-O / IPA Analyzer") to {
+            startActivity(android.content.Intent(this, com.aide.mobilestudio.asteros.AsterOSActivity::class.java))
+        },
         ui("Dependency Search") to {
             val dir = currentProjectDir
             if (dir != null) DependencySearchDialog(this).show(dir)
