@@ -48,7 +48,10 @@ object StorageHelper {
         "build.gradle", "build.gradle.kts",
         "settings.gradle", "settings.gradle.kts",
         "pom.xml", "CMakeLists.txt", "AndroidManifest.xml",
-        "extension.json", "package.json", ".git", "src", "app"
+        "extension.json", "package.json", ".git", "src", "app",
+        // C/C++ / Windows .exe projects (root main.c + README.md)
+        "main.c", "main.cpp", "main.cc",
+        "Makefile", "meson.build",
     )
 
     /** 프로젝트로 인식할 수 있는 마커가 있는 디렉터리만 프로젝트로 취급한다.

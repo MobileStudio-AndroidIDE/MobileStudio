@@ -422,6 +422,14 @@ NPE. (`AiAgentPanel`은 attach된 MainActivity 컨텍스트를 받으므로 문�
 - **테스트**: `ExecutableSecurityScannerTest`(5) — 신뢰레벨/해시/정책 차단/요약.
   (scan()의 실파일 경로는 JNI 아키텍처 검사를 호출하므로 JVM 테스트에서 제외, 기기 테스트 필요)
 
+### .exe 프로젝트가 "프로젝트 열기"에 안 보이던 문제
+- `StorageHelper.PROJECT_MARKERS`에 `main.c`/`main.cpp`가 없어서
+  Windows .exe 템플릿 프로젝트(루트에 `main.c` + `README.md`만 있음)가
+  `looksLikeProject()`에서 `false` → 프로젝트 목록에서 필터링.
+- 수정: `main.c`, `main.cpp`, `main.cc`, `Makefile`, `meson.build` 추가.
+- .exe 탭 플로우 신설: `openFile()` → `.exe` 감지 → `promptRunExe()` 확인 다이얼로그
+  → (미설치면) `installThenRun()` 자동 설치+prefix부팅+실행, (설치됨) `runExeWithBox64()`.
+
 ### 정직한 한계
 - Wine을 **소스에서 포팅/컴파일한 것**이 아니라, 검증된 사전 빌드 런타임을 내려받는 방식
   (ARM64에서 x86_64 Windows .exe를 돌리는 표준 접근). Wine 소스 크로스컴파일은
@@ -430,6 +438,109 @@ NPE. (`AiAgentPanel`은 attach된 MainActivity 컨텍스트를 받으므로 문�
 - 실기기에서의 실제 .exe 실행 검증은 이 환경에서 불가(기기 필요). 에뮬레이션 특성상
   성능은 네이티브 대비 느리고 GPU/DirectX 가속은 없음.
 
+---
+
+## 20. 8차 작업 — 실기기 디버깅: app-data exec 차단 우회
+
+### 실기기 로그 분석 (SM-S926N, Android 16)
+사용자가 제공한 진단 로그가 원인을 정확히 밝혔다:
+
+| 진단 | 결과 | 의미 |
+|---|---|---|
+| T1 app-data ELF 직접 exec | **FAIL error=13** | app 데이터 디렉터리 execve 차단 |
+| T8 codeCache exec | **FAIL error=13** | 마찬가지 |
+| T5/T6 sh -c / script | OK | 셸 스크립트는 read로 실행 가능 |
+| S0 fork_loader(nativeLibDir) | **OK** | **APK 네이티브 lib 디렉터리는 exec 허용** |
+| box64/wine64 실행 | `Could not find a PHDR` exit=134 | glibc box64가 ld-linux(app-data)를 로드하려다 차단 |
+| prefix 초기화 | `ld-linux-aarch64.so.1 error=13` | 마찬가지 |
+
+결론: **glibc box64(app-data)는 어떤 체인으로도 실행 불가**. 실행 가능한 것은
+(1) 시스템 바이너리, (2) APK 네이티브 lib 디렉터리(apk_data_file) — S0가 증명.
+
+### 해결: bionic box64를 APK에 패키징
+- 저장소의 **NDK 28.2 (linux-x86_64)**로 box64(ptitSeb master)를
+  `cmake -DANDROID=ON -DARM_DYNAREC=ON -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28`
+  로 크로스 빌드 → **PT_INTERP=/system/bin/linker64**(시스템 링커) → 네이티브 lib
+  디렉터리에서 직접 exec 가능(S0와 동일 경로).
+- `llvm-strip` 후 **`app/src/main/jniLibs/arm64-v8a/libbox64.so`**(22MB)로 패키징.
+  NEEDED: libc/libm/libdl만 (bionic, 추가 의존성 없음).
+- `effectiveBox64()`가 이미 이 파일을 최우선 사용하도록 설계되어 있었고,
+  `ExecHelper.createProcess`도 native-lib 디렉터리 ARM64는 직접 exec 처리.
+  즉 **코드는 준비돼 있었고 바이너리만 빠져 있었음.**
+
+### 버그 수정
+- **wine 건강 검사 오탐**: `bin/wine64`는 원래 ~14KB 런처 스텁인데 500KB 규칙이
+  오탐 → **79MB wine을 매번 재다운로드**하는 무한 루프. 실제 페이로드
+  (`lib64/wine/x86_64-unix/ntdll.so`)를 기준으로 수정.
+- **isInstalled**: 다운로드 box64/glibc loader 없이도 패키지 box64+wine64로 판단.
+- **installBox64Only**: 패키지 box64가 있으면 57MB 다운로드 생략.
+
+### 검증
+- 컴파일/테스트/APK 빌드 통과. APK 198MB (box64 포함).
+- 실기기 재검증 필요: 전체 설치(다운로드 생략 확인) → prefix 초기화 → 체인 테스트
+  (S2: box64 --version이 이제 정상 출력되어야 함).
+
+### 추가 수정 — runCommand가 ExecHelper 라우팅을 우회하던 문제
+- `WindowsExeEnvironment.runCommand`가 raw `ProcessBuilder`를 사용해
+  ExecHelper의 exec 전략 선택(native-lib 직접 / linker64 / ld-linux)을 우회했다.
+  `bootstrapPrefix`와 `diagnoseExecEnvironment`가 이 함수를 사용하므로
+  패키지 box64가 있어도 glibc 체인(ld-linux EACCES)으로 떨어졌다.
+- 수정: `ExecHelper.createProcess`로 교체 — 모든 실행이 이제 동일한 exec 전략 선택을 거침.
+
+### 추가 수정 — BOX64_LD_LIBRARY_PATH에 x86_64 glibc libs 누락
+**실기기 로그**: box64는 실행되지만 wine64 로딩에서
+`Global Symbol __libc_start_main not found, cannot apply R_X86_64_GLOB_DAT` → SIGSEGV(139)
+
+**원인**: `x86LibDir()`가 `x86_64-linux-gnu` 디렉터리를 찾지만, mobox glibc-prefix는
+x86_64 libs를 `lib64/`와 `usr/lib64/`에 배치 (디렉터리 이름이 다름) → null 반환 →
+`BOX64_LD_LIBRARY_PATH`에서 x86_64 glibc libs 누락 → box64가 wine64의
+`__libc_start_main`(libc.so.6에 있음)을 해석 불가 → SIGSEGV.
+
+**수정 (2단계)**:
+1. 조건부 탐지 → **무조건 경로 추가**: box64는 경로에 없는 디렉터리를 자동 skip하므로
+   존재 여부 체크 없이 모든 후보를 추가하는 것이 확실.
+   `BOX64_LD_LIBRARY_PATH = glibcPkgDir/lib64 : glibcPkgDir/usr/lib64 : wine lib64/wine/x86_64-unix : wine lib64/wine/x86_64-windows : ...`
+2. `Log.i`로 실제 BOX64_LD_LIBRARY_PATH 값을 logcat에 출력 (디버깅용).
+
+### 추가 수정 — wine tar의 중첩 디렉터리 미제거
+**logcat 확인**: `BOX64_LD_LIBRARY_PATH`에 wine 디렉터리가 전혀 없음.
+에러 경로: `wine-ge-custom/wine-ge-custom/bin/wine64` — **중첩!**
+
+**원인**: wine tar.xz에 최상위 `wine-ge-custom/` 디렉터리가 포함되어 있으나
+`extractTarXz`의 stripPrefix가 이를 제거하지 못함 → 모든 파일이
+`winePkgDir/wine-ge-custom/`에 추출됨. `wine64Path()`는 재귀 탐색이라 찾지만
+`buildEnvironment()`의 고정 경로(`winePkgDir/lib64/wine/x86_64-unix`)는
+존재하지 않는 위치를 가리킴 → wine 디렉터리가 BOX64_LD_LIBRARY_PATH에서 누락.
+
+**수정**: `installWineOnly()`에서 압축 해제 직후 중첩 디렉터리 감지 →
+내용물을 `winePkgDir` 루트로 이동(flatten) → 중첩 디렉터리 삭제.
+이후 `wineUnixLibDir()`, `buildEnvironment()` 등 모든 고정 경로가 정상 동작.
+
+---
+
+## 21. Wine GUI — X11 디스플레이 서버 연동
+
+### 현재 상태 (정직)
+- **콘솔 앱**: 동작 (printf, scanf 등 — 빌드 패널에 출력)
+- **GUI 앱**: ❌ X11 서버 없음 — Wine의 `winex11.drv`가 연결할 X 서버가 없어 화면에 못 그림
+- `DISPLAY=:0`은 설정되어 있지만 실제 X 서버가 없는 상태
+
+### 해결 방식: XServer XSDL 연동 (mobox와 동일)
+- **XServer XSDL** (F-Droid 무료 오픈소스)을 외부 X 서버로 사용
+- Wine이 XSDL에 연결(`DISPLAY=:0`) → XSDL이 Android 화면에 렌더링
+- Winlator처럼 내장 X 서버를 만드는 것은 수개월 규모의 별도 프로젝트
+
+### 구현 내용
+- `WindowsExeEnvironment.ensureXServer()`: XSDL 패키지 탐지/실행/소켓 대기
+- `installThenRun` 플로우에 X 서버 실행 단계 추가
+
+### 사용자 가이드
+1. F-Droid에서 **XServer XSDL** 설치 (무료)
+2. .exe 실행 → XSDL이 자동 시작 → GUI 창이 XSDL 화면에 표시
+
+### 미구현 (Winlator 대비)
+- 내장 X 서버 (SurfaceView 렌더링) — 수개월 규모
+- 터치→마우스 최적화, Vulkan/GPU 가속, 오디오 브리지
 
 
 
@@ -437,3 +548,24 @@ NPE. (`AiAgentPanel`은 attach된 MainActivity 컨텍스트를 받으므로 문�
 
 
 
+
+
+## 22. MiniXServer 대규모 확장 — Wine GUI를 위한 완전한 X11 서버
+
+### 구현한 X11 프로토콜
+
+**텍스트 렌더링:** PolyText8/16, ImageText8/16, OpenFont, QueryFont — Canvas.drawText() 렌더링
+
+**Atom 관리:** 42개 표준 atom 사전 정의 + InternAtom 동적 생성 + Property 저장/조회
+
+**ClipRectangles:** ChangeGC clip-x/y 파싱 → applyClip() 헬퍼로 모든 드로잉에 적용
+
+**추가 드로잉:** PolyLine, PolySegment, PolyRectangle, PolyArc/FillArc, Pixmap
+
+**입력:** injectPointerEvent/injectKeyEvent — X11 이벤트 생성 및 클라이언트 전달
+
+**모든 request에 reply 반환** — Wine이 hang하지 않음
+
+**오디오:** wine/WineAudio.kt — AudioTrack 기반 PCM 출력 인프라
+
+**파일:** wine/MiniXServer.kt (~900줄), wine/WineGuiActivity.kt, wine/WineAudio.kt

@@ -1,6 +1,7 @@
 package com.aide.mobilestudio
 
 import android.content.Context
+import android.content.Intent
 import android.system.Os
 import android.util.Log
 import java.io.File
@@ -38,6 +39,7 @@ class WindowsExeEnvironment(private val context: Context) {
         private const val TAG = "WinExeEnv"
         private const val DIR = "toolchain/win64"
         private const val PKG_GLIBC = "glibc-prefix"
+        private const val PKG_GLIBC_X86 = "glibc-x86_64"
         private const val PKG_BOX64 = "box86-box64-binaries"
         private const val PKG_WINE = "wine-ge-custom"
         private const val GITLAB_API = "https://gitlab.com/api/v4/projects/52465323/repository/files"
@@ -84,6 +86,7 @@ class WindowsExeEnvironment(private val context: Context) {
     private val downloadsDir: File get() = File(win64Dir, "downloads")
     private val pkgsDir: File get() = File(win64Dir, "pkgs")
     private val glibcPkgDir: File get() = File(pkgsDir, PKG_GLIBC)
+    private val glibcX86Dir: File get() = File(pkgsDir, PKG_GLIBC_X86)
     private val box64PkgDir: File get() = File(pkgsDir, PKG_BOX64)
     private val winePkgDir: File get() = File(pkgsDir, PKG_WINE)
     private val winePrefix: File get() = File(win64Dir, "wineprefix")
@@ -170,14 +173,42 @@ class WindowsExeEnvironment(private val context: Context) {
     fun x86LibDir(): File? = cachedX86LibDir ?: (
         findDirRecursive(glibcPkgDir, "x86_64-linux-gnu")
             ?: findDirRecursive(box64PkgDir, "x86_64-linux-gnu")
+            // mobox glibc-prefix layout: x86_64 glibc libs live in lib64/
+            ?: File(glibcPkgDir, "lib64").takeIf { d ->
+                d.isDirectory && d.listFiles()?.any { f -> f.name.startsWith("libc.so") } == true
+            }
+            ?: File(glibcPkgDir, "usr/lib64").takeIf { d ->
+                d.isDirectory && d.listFiles()?.any { f -> f.name.startsWith("libc.so") } == true
+            }
         )?.also { cachedX86LibDir = it }
+
+    /** All directories that contain x86_64 shared libraries for BOX64_LD_LIBRARY_PATH. */
+    fun x86LibDirs(): List<String> {
+        val dirs = mutableListOf<String>()
+        x86LibDir()?.let { dirs.add(it.absolutePath) }
+        // mobox glibc-prefix puts x86_64 libs in lib64/ and usr/lib64/
+        listOf(File(glibcPkgDir, "lib64"), File(glibcPkgDir, "usr/lib64")).forEach { d ->
+            if (d.isDirectory && dirs.none { it == d.absolutePath }) {
+                val hasX86 = d.listFiles()?.any { f ->
+                    f.isFile && (f.name.startsWith("libc.so") || f.name.startsWith("libm.so"))
+                } == true
+                if (hasX86) dirs.add(d.absolutePath)
+            }
+        }
+        return dirs.distinct()
+    }
     fun wineUnixLibDir(): File? = cachedWineUnixDir ?: listOf(
         File(winePkgDir, "lib/wine/x86_64-unix"),
         File(winePkgDir, "lib64/wine/x86_64-unix"),
         File(winePkgDir, "lib/wine")
     ).firstOrNull { it.isDirectory }?.also { cachedWineUnixDir = it }
 
-    val isInstalled: Boolean get() = loaderPath() != null && box64Path() != null && wine64Path() != null
+    /**
+     * Ready-to-run when a box64 (preferably the packaged bionic one, which
+     * execs directly from the APK's native lib dir) and wine64 exist. The
+     * glibc loader is only required by the downloaded glibc box64 fallback.
+     */
+    val isInstalled: Boolean get() = effectiveBox64() != null && wine64Path() != null
     val isPrefixBooted: Boolean get() = File(winePrefix, BOOT_MARKER).exists()
 
     /** Ensures box64 binary is valid, re-downloading from GitHub if corrupted. */
@@ -206,6 +237,15 @@ fun install(onProgress: (String) -> Unit) {
 
     /** Downloads/refreshes only the box64 binary. */
     fun installBox64Only(onProgress: (String) -> Unit) {
+        // The APK ships a bionic box64 (libbox64.so) that execs directly from
+        // the native lib dir — the only path that works on ROMs that block
+        // app-data execve. The GitHub download is only a fallback for that.
+        val packaged = File(context.applicationInfo.nativeLibraryDir, "libbox64.so")
+        if (packaged.isFile && packaged.length() > 0L) {
+            onProgress("box64 ready (packaged bionic build, ${packaged.length()} bytes)")
+            File(box64PkgDir, ".complete").writeText("1")
+            return
+        }
         onProgress("Downloading box64 from GitHub...")
         val box64File = File(box64PkgDir, "bin/box64")
         box64File.parentFile?.mkdirs()
@@ -232,6 +272,23 @@ fun install(onProgress: (String) -> Unit) {
         }
     }
 
+    /** Downloads the x86_64 glibc runtime (needed by box64 to load wine64). */
+    fun installX86GlibcOnly(onProgress: (String) -> Unit) {
+        if (X86GlibcDownloader.isInstalled(glibcX86Dir)) {
+            onProgress("x86_64 glibc already installed")
+            return
+        }
+        onProgress("Downloading x86_64 glibc runtime...")
+        val result = X86GlibcDownloader.ensureX86Glibc(context, glibcX86Dir, onProgress)
+        if (!result.success) {
+            Log.w(TAG, "x86_64 glibc failed: ${result.message}")
+            onProgress("ERROR: ${result.message}")
+        } else {
+            File(glibcX86Dir, ".complete").writeText("1")
+            onProgress("x86_64 glibc ready")
+        }
+    }
+
     /** Downloads/refreshes only the wine64 runtime (GitLab tar.xz). */
     fun installWineOnly(onProgress: (String) -> Unit) {
         if (File(winePkgDir, ".complete").exists()) {
@@ -244,6 +301,19 @@ fun install(onProgress: (String) -> Unit) {
         onProgress("Extracting wine...")
         extractTarXz(archive, winePkgDir, onProgress)
         archive.delete()
+        // The tar contains a top-level wine-ge-custom/ directory that stripPrefix
+        // does not always remove. Flatten it so wine64Path(), wineUnixLibDir()
+        // and buildEnvironment() find files at the expected paths.
+        val nested = winePkgDir.listFiles()?.firstOrNull { it.isDirectory && it.name == PKG_WINE }
+        if (nested != null && nested.isDirectory) {
+            onProgress("Flattening wine directory layout...")
+            nested.listFiles()?.forEach { child ->
+                val target = File(winePkgDir, child.name)
+                if (target.exists()) target.deleteRecursively()
+                runCatching { child.renameTo(target) }
+            }
+            nested.delete()
+        }
         File(winePkgDir, ".complete").writeText("1")
     }
 
@@ -255,18 +325,33 @@ fun install(onProgress: (String) -> Unit) {
      */
     fun ensureComponentHealth(onProgress: (String) -> Unit = {}): Boolean {
         var broke = false
-        val box = File(box64PkgDir, "bin/box64")
-        if (box.exists() && box.length() < MIN_HEALTHY_BYTES) {
-            onProgress("box64 too small (${box.length()} B) — re-downloading")
-            runCatching { box.delete(); File(box64PkgDir, ".complete").delete() }
-            broke = true
-        }
-        wine64Path()?.let { w ->
-            if (w.exists() && w.length() < MIN_HEALTHY_BYTES) {
-                onProgress("wine64 too small (${w.length()} B) — re-downloading")
-                runCatching { File(winePkgDir, ".complete").delete(); winePkgDir.deleteRecursively() }
+        // box64: the packaged bionic build (libbox64.so in the APK's native lib
+        // dir) is the preferred runtime and cannot be corrupted by downloads —
+        // only the downloaded glibc fallback is size-checked.
+        if (effectiveBox64()?.absolutePath?.startsWith(nativeLibraryDir()) != true) {
+            val box = File(box64PkgDir, "bin/box64")
+            if (box.exists() && box.length() < MIN_HEALTHY_BYTES) {
+                onProgress("box64 too small (${box.length()} B) — re-downloading")
+                runCatching { box.delete(); File(box64PkgDir, ".complete").delete() }
                 broke = true
             }
+        }
+        // wine: bin/wine64 is a tiny launcher stub by design (~14 KB) — the
+        // 500 KB rule there caused an endless 79 MB re-download loop. Health is
+        // signalled by the real runtime payload instead (x86_64-unix/ntdll.so).
+        val wineRuntime = File(winePkgDir, "lib64/wine/x86_64-unix/ntdll.so")
+            .takeIf { it.isFile }
+            ?: File(winePkgDir, "lib/wine/x86_64-unix/ntdll.so").takeIf { it.isFile }
+        if (wine64Path() == null || wineRuntime == null || wineRuntime.length() < MIN_HEALTHY_BYTES) {
+            onProgress(
+                when {
+                    wine64Path() == null -> "wine64 missing — re-downloading"
+                    wineRuntime == null -> "wine runtime payload missing — re-downloading"
+                    else -> "wine runtime too small (${wineRuntime.length()} B) — re-downloading"
+                },
+            )
+            runCatching { File(winePkgDir, ".complete").delete(); winePkgDir.deleteRecursively() }
+            broke = true
         }
         loaderPath()?.let { ld ->
             if (ld.exists() && ld.length() < MIN_HEALTHY_BYTES && !isValidElf64(ld)) {
@@ -284,6 +369,8 @@ fun install(onProgress: (String) -> Unit) {
         }
         return broke
     }
+
+    private fun nativeLibraryDir(): String = context.applicationInfo.nativeLibraryDir
 
     private fun isValidGlibc(dir: File): Boolean {
         return GlibcDownloader.isValidGlibc(dir)
@@ -330,11 +417,29 @@ fun install(onProgress: (String) -> Unit) {
     }
 
     fun buildEnvironment(): Map<String, String> {
-        val aarch64Lib = loaderPath()?.parentFile?.absolutePath ?: ""
-        val x86Lib = x86LibDir()?.absolutePath ?: ""
-        val wineUnix = wineUnixLibDir()?.absolutePath ?: ""
-        val box64LibPath = listOf(x86Lib, wineUnix, aarch64Lib).filter { it.isNotEmpty() }.joinToString(":")
         tmpDir.mkdirs()
+        // BOX64_LD_LIBRARY_PATH is for GUEST (x86_64) libraries only. It must
+        // contain the x86_64 glibc runtime + wine x86_64 libs — and must NOT
+        // contain the aarch64 glibc dirs (glibc-prefix/lib64 is AArch64 on this
+        // package), otherwise box64 resolves wine64's libc.so.6 to the wrong
+        // ELF class and crashes.
+        val libDirs = mutableListOf<String>()
+        // x86_64 glibc runtime (ld-linux-x86-64.so.2, libc.so.6, libpthread...)
+        listOf(
+            File(glibcX86Dir, "x86_64-linux-gnu"),
+            File(glibcX86Dir, "usr/lib/x86_64-linux-gnu"),
+        ).forEach { if (it.isDirectory) libDirs.add(it.absolutePath) }
+        // Wine x86_64 host libs and PE modules
+        listOf(
+            File(winePkgDir, "lib64/wine/x86_64-unix"),
+            File(winePkgDir, "lib64/wine/x86_64-windows"),
+            File(winePkgDir, "lib/wine/x86_64-unix"),
+            File(winePkgDir, "lib/wine/x86_64-windows"),
+        ).forEach { if (it.isDirectory) libDirs.add(it.absolutePath) }
+        // x86_64-linux-gnu elsewhere if the package uses that layout
+        x86LibDir()?.absolutePath?.let { if (it !in libDirs) libDirs.add(it) }
+        val box64LibPath = libDirs.distinct().joinToString(":")
+        Log.i(TAG, "BOX64_LD_LIBRARY_PATH=$box64LibPath")
         return mapOf(
             "HOME" to win64Dir.absolutePath,
             "TMPDIR" to tmpDir.absolutePath,
@@ -351,22 +456,46 @@ fun install(onProgress: (String) -> Unit) {
         )
     }
 
+    // =====================================================================
+    // X11 디스플레이 서버 (Wine GUI용)
+    // =====================================================================
+
+    private val xServerPackages = listOf(
+        "x11.xserver",
+        "au.com.darkside.XServer",
+    )
+
+    fun findInstalledXServer(): String? =
+        xServerPackages.firstOrNull { pkg ->
+            runCatching { context.packageManager.getPackageInfo(pkg, 0) }.isSuccess
+        }
+
+    fun ensureXServer(onProgress: (String) -> Unit = {}): Boolean {
+        val pkg = findInstalledXServer()
+        if (pkg == null) {
+            onProgress("X server app not installed. Install XServer XSDL from F-Droid.")
+            return false
+        }
+        onProgress("Starting X server ($pkg)...")
+        runCatching {
+            val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+            intent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+        }
+        for (i in 0 until 20) {
+            Thread.sleep(500)
+            runCatching {
+                java.net.Socket("127.0.0.1", 6000).use { s ->
+                    if (s.isConnected) { onProgress("X server ready (TCP)"); return true }
+                }
+            }
+        }
+        onProgress("X server socket timeout — running in console mode")
+        return false
+    }
+
     // =========================================================================
     // Box64 ARM64 네이티브 실행 경로
-    //
-    // 이 ROM은 untrusted_app의 app-data ELF execve를 SELinux로 전면 차단한다
-    // (EACCES/exit=126). Box64 실행을 위해 ELF 종류별로 실행 경로를 구성한다:
-    //
-    //   box64 종류                 실행 경로
-    //   --------------------------------------------------------------------
-    //   bionic (PT_INTERP=linker64) + native lib dir (libbox64.so 패키징)
-    //                             → 커널 직접 exec (apk_data_file 허용)
-    //   bionic + app data         → /system/bin/linker64 로딩 (JRE 방식)
-    //   glibc (ld-linux-aarch64)  → [ld-linux, box64] + args
-    //                               (ld.so가 box64를 로드; app-data exec가
-    //                                차단되면 memfd 경로가 별도로 필요)
-    //
-    // wine64는 x86-64 그대로 — box64가 에뮬레이션한다 (Box64 → Wine64 → EXE).
     // =========================================================================
 
     /** 사용할 box64 파일: native lib dir에 libbox64.so가 있으면 최우선. */
@@ -937,12 +1066,14 @@ fun install(onProgress: (String) -> Unit) {
         timeoutMs: Long,
         onLine: (String) -> Unit
     ): Int {
+        // Route through ExecHelper so the exec strategy is chosen per binary:
+        // native-lib dir → direct exec, app-data bionic → linker64, app-data
+        // glibc → ld-linux. A raw ProcessBuilder here bypassed that routing and
+        // failed with EACCES on ROMs that block app-data execve (Android 16).
         val effectiveArgs = adjustArgsForExec(args)
         val process = try {
-            ProcessBuilder(effectiveArgs)
-                .directory(cwd)
+            ExecHelper.createProcess(context, effectiveArgs, cwd, env)
                 .redirectErrorStream(true)
-                .apply { environment().putAll(env) }
                 .start()
         } catch (e: Exception) {
             Log.e(TAG, "runCommand start failed: ${e.message}", e)

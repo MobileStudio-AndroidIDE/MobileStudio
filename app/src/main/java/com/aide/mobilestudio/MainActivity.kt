@@ -3810,7 +3810,7 @@ Long press: Toggle Shell panel"""
             return
         }
         if (file.extension.equals("exe", ignoreCase = true)) {
-            showExeActionsDialog(file)
+            promptRunExe(file)
             return
         }
         if (isBlockedEditorFile(file)) {
@@ -3990,6 +3990,134 @@ Long press: Toggle Shell panel"""
                 startActivity(android.content.Intent(this, com.aide.mobilestudio.extension.ExtensionManagerActivity::class.java))
             }
             .show()
+    }
+
+    /**
+     * .exe 탭 → Wine/Box64 실행 확인 → (미설치면 자동 설치) → 실행.
+     */
+    private fun promptRunExe(file: File) {
+        val ko = AppLanguage.isKorean(this)
+        val env = WindowsExeEnvironment(this)
+        val needsInstall = !env.isInstalled
+        val needsPrefix = env.isInstalled && !env.isPrefixBooted
+
+        val message = when {
+            needsInstall -> if (ko)
+                "Wine과 Box64로 이 .exe 파일을 실행하시겠습니까?\n\n" +
+                    "최초 실행 시 런타임을 다운로드합니다 (약 120MB, Wi-Fi 권장).\n" +
+                    "설치 후 Wine prefix 초기화에 몇 분이 소요될 수 있습니다."
+            else
+                "Run this .exe with Wine & Box64?\n\n" +
+                    "First run downloads the runtime (~120 MB, Wi-Fi recommended).\n" +
+                    "Wine prefix initialisation may take a few minutes."
+            needsPrefix -> if (ko)
+                "Wine과 Box64로 이 .exe 파일을 실행하시겠습니까?\n\n" +
+                    "Wine prefix 초기화가 필요합니다 (몇 분 소요)."
+            else
+                "Run this .exe with Wine & Box64?\n\n" +
+                    "Wine prefix needs to be initialised (may take a few minutes)."
+            else -> if (ko)
+                "Wine과 Box64로 .exe 파일을 실행하시겠습니까?"
+            else
+                "Run this .exe with Wine & Box64?"
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(file.name)
+            .setMessage(message)
+            .setPositiveButton(if (ko) "▶ 실행" else "▶ Run") { _, _ ->
+                if (needsInstall) installThenRun(file)
+                else runExeWithBox64(file)
+            }
+            .setNegativeButton(if (ko) "취소" else "Cancel", null)
+            .setNeutralButton(if (ko) "상세 옵션" else "More options") { _, _ ->
+                showExeActionsDialog(file)
+            }
+            .show()
+    }
+
+    /**
+     * Wine/Box64 환경이 없으면 설치하고, prefix를 부팅한 뒤 .exe를 실행한다.
+     * 진행 상황은 빌드 패널에 스트리밍된다.
+     */
+    private fun installThenRun(file: File) {
+        val ko = AppLanguage.isKorean(this)
+        showBottomPanel()
+        switchToPanel("build")
+        buildOutput.clear()
+        buildOutput.appendLine(
+            if (ko) "═══ Wine & Box64 설치 + 실행 ═══"
+            else "═══ Wine & Box64 install + run ═══",
+            LineLevel.INFO,
+        )
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle(if (ko) "Wine & Box64 설치 중…" else "Installing Wine & Box64…")
+            .setMessage(if (ko) "준비 중…" else "Preparing…")
+            .setCancelable(false)
+            .create()
+        progressDialog.show()
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                val env = WindowsExeEnvironment(this@MainActivity)
+                if (!env.isInstalled) {
+                    withContext(Dispatchers.Main) {
+                        progressDialog.setMessage(if (ko) "런타임 다운로드 중…" else "Downloading runtime…")
+                    }
+                    env.install { msg ->
+                        runOnUiThread {
+                            buildOutput.appendLine(msg, LineLevel.INFO)
+                            progressDialog.setMessage(msg)
+                        }
+                    }
+                }
+                if (!env.isPrefixBooted) {
+                    withContext(Dispatchers.Main) {
+                        progressDialog.setMessage(
+                            if (ko) "Wine prefix 초기화 중 (몇 분 소요)…"
+                            else "Bootstrapping Wine prefix (may take minutes)…",
+                        )
+                        buildOutput.appendLine(
+                            if (ko) "> Wine prefix 초기화 시작…"
+                            else "> Bootstrapping Wine prefix…",
+                            LineLevel.INFO,
+                        )
+                    }
+                    env.bootstrapPrefix { msg ->
+                        runOnUiThread { buildOutput.appendLine(msg, LineLevel.INFO) }
+                    }
+                }
+                // Launch X server for GUI support (XServer XSDL)
+                withContext(Dispatchers.Main) {
+                    progressDialog.dismiss()
+                }
+                env.ensureXServer { msg ->
+                    runOnUiThread { buildOutput.appendLine("> $msg", LineLevel.INFO) }
+                }
+                withContext(Dispatchers.Main) {
+                    progressDialog.dismiss()
+                    buildOutput.appendLine(
+                        if (ko) "> 설치 완료 — ${file.name} 실행 중…"
+                        else "> Install complete — running ${file.name}…",
+                        LineLevel.INFO,
+                    )
+                }
+                val code = env.runWindowsExe(file) { line ->
+                    runOnUiThread { buildOutput.appendLine(line, LineLevel.INFO) }
+                }
+                withContext(Dispatchers.Main) {
+                    buildOutput.appendLine("> exit=$code", LineLevel.INFO)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    progressDialog.dismiss()
+                    buildOutput.appendLine(
+                        if (ko) "> 설치/실행 오류: ${e.message}" else "> Install/run error: ${e.message}",
+                        LineLevel.ERROR,
+                    )
+                }
+            }
+        }
     }
 
     private fun showExeActionsDialog(file: File) {
