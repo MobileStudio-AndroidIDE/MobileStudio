@@ -1621,6 +1621,11 @@ class AiWorkspaceActivity : AppCompatActivity() {
 
             override fun onStateChange(state: OcEngine.AgentState) = runOnUiThread {
                 engineState = state
+                // The bottom bar's token count is derived from the stored
+                // messages, so it has to be recomputed as the turn moves.
+                // Without this it kept the value from the initial build - the
+                // bar read "0 tok" for the whole session.
+                updateStatusBar()
                 // Stop the rate clock the moment the engine leaves GENERATING,
                 // freezing the finished turn's average on screen instead of
                 // blanking it. (It was started by the first streamed chunk.)
