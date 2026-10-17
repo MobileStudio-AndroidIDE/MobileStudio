@@ -377,8 +377,7 @@ class CommandPalette(private val activity: Activity) {
             mainActivity.startActivity(intent)
         }
         updateAction("ai_chat") {
-            mainActivity.showBottomPanel()
-            mainActivity.switchToPanel("ai")
+            mainActivity.openAiWorkspace()
         }
     }
 

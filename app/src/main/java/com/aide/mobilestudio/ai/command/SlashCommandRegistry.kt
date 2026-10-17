@@ -1,9 +1,8 @@
 package com.aide.mobilestudio.ai.command
 
 /**
- * Local slash-command table shared by BOTH chat surfaces (the bottom
- * [com.aide.mobilestudio.ai.ui.AiAgentPanel] and the full-screen
- * [com.aide.mobilestudio.ai.ui.AiWorkspaceActivity]).
+ * Local slash-command table used by the full-screen
+ * [com.aide.mobilestudio.ai.ui.AiWorkspaceActivity].
  *
  * The table is pure data + pure functions (no Android classes, no engine
  * references) so it can be unit tested on the JVM. Each command carries a
@@ -108,7 +107,7 @@ class SlashCommandRegistry(commands: List<SlashCommand> = defaultCommands()) {
             SlashCommand("clear", "clear the conversation (asks before discarding)", SlashCommandAction.CLEAR),
             SlashCommand("new", "start a new session", SlashCommandAction.NEW_SESSION),
             SlashCommand("sessions", "open the session list", SlashCommandAction.SHOW_SESSIONS),
-            SlashCommand("model", "choose a model", SlashCommandAction.SHOW_MODELS),
+            SlashCommand("model", "choose a model", SlashCommandAction.SHOW_MODELS, aliases = listOf("models")),
             SlashCommand("plan", "toggle plan (read-only) mode", SlashCommandAction.TOGGLE_PLAN),
             SlashCommand("undo", "undo the agent's last file changes", SlashCommandAction.UNDO),
             SlashCommand("redo", "re-apply the last undone change", SlashCommandAction.REDO),

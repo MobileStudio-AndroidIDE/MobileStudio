@@ -4,9 +4,9 @@ import android.view.ViewTreeObserver
 import android.widget.LinearLayout
 
 /**
- * Shared geometry for chat message bubbles. The bottom AI panel
- * ([AiAgentPanel]) and the full-screen workspace ([AiWorkspaceActivity]) use
- * identical rules: the user bubble is a WRAP_CONTENT child of a MATCH_PARENT
+ * Shared geometry for chat message bubbles. The full-screen workspace
+ * ([AiWorkspaceActivity]) uses these rules: the user bubble is a
+ * WRAP_CONTENT child of a MATCH_PARENT
  * horizontal row aligned to the end, and its width is capped at
  * [USER_BUBBLE_MAX_WIDTH_FRACTION] of the row so short messages stay narrow
  * while long ones wrap instead of spanning the full width.

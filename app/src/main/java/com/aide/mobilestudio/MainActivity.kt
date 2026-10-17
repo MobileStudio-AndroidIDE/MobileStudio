@@ -100,7 +100,6 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
     private lateinit var editorOverlay: FrameLayout
     private lateinit var projectTabContainer: LinearLayout
     private lateinit var projectTabScroll: HorizontalScrollView
-    private lateinit var aiAgentPanel: com.aide.mobilestudio.ai.ui.AiAgentPanel
 
     // Live Edit pipeline
     private var fileWatcher: FileWatcher? = null
@@ -854,8 +853,7 @@ Long press: Toggle Shell panel"""
     private fun handleOpenAiPanelIntent() {
         if (intent.getBooleanExtra("open_ai_panel", false)) {
             intent.removeExtra("open_ai_panel")
-            showBottomPanel()
-            switchToPanel("ai")
+            openAiWorkspace()
         }
     }
 
@@ -1045,14 +1043,9 @@ Long press: Toggle Shell panel"""
                 importExternalProject(uri)
             }
         }
-        // Handle GGUF model import from AI panel
-        if (requestCode == 0x4247) {
-            aiAgentPanel?.onGgufImportResult(requestCode, resultCode, data)
-        }
-        // Handle AI image attachment
-        if (requestCode == 9999 && resultCode == RESULT_OK) {
-            aiAgentPanel?.onImagePicked(data?.data)
-        }
+        // GGUF import / attachment picker results no longer route through
+        // MainActivity: the old bottom-panel AI owned those pickers, and the
+        // workspace handles its own (see AiWorkspaceActivity.onActivityResult).
     }
 
     private fun deferStartupWork() {
@@ -1197,7 +1190,6 @@ Long press: Toggle Shell panel"""
         breadcrumb = find(R.id.breadcrumb, "breadcrumb")
         projectTabContainer = find(R.id.project_tab_container, "project_tab_container")
         projectTabScroll = find(R.id.project_tab_scroll, "project_tab_scroll")
-        aiAgentPanel = find(R.id.ai_agent_panel, "ai_agent_panel")
     }
 
     // MobileStudio comment
@@ -1563,7 +1555,7 @@ Long press: Toggle Shell panel"""
                 if (dir != null) gitManager.showGitDialog(dir) else showToast(ui("Open a project first"))
             },
             R.id.side_item_shell to { showBottomPanel(); switchToPanel("shell") },
-            R.id.side_item_chat to { showBottomPanel(); switchToPanel("ai") },
+            R.id.side_item_chat to { openAiWorkspace() },
             R.id.side_item_ai to { openAiWorkspace() },
             R.id.side_item_extensions to {
                 startActivity(android.content.Intent(this, com.aide.mobilestudio.extension.ExtensionManagerActivity::class.java))
@@ -1669,7 +1661,7 @@ Long press: Toggle Shell panel"""
         ui("Save") to { saveCurrentFile(); showToast(ui("Saved")) },
         ui("Word Wrap") to { toggleWordWrap() },
         ui("Terminal") to { showBottomPanel(); switchToPanel("shell") },
-        ui("AI Assistant") to { showBottomPanel(); switchToPanel("ai") },
+        ui("AI Assistant") to { openAiWorkspace() },
         ui("Tools") to { ToolsActivity.start(this) },
         ui("Shell") to { showBottomPanel(); switchToPanel("shell") },
         ui("Logcat") to { showBottomPanel(); switchToPanel("logcat") },
@@ -1717,7 +1709,7 @@ Long press: Toggle Shell panel"""
         ui("Open Shell Panel") to { showBottomPanel(); switchToPanel("shell") },
         ui("File Explorer") to { openFileExplorer() },
         // Formerly quick-action toolbar buttons.
-        ui("AI Panel") to { showBottomPanel(); switchToPanel("ai") },
+        ui("AI Workspace") to { openAiWorkspace() },
         ui("Terminal") to { showBottomPanel(); switchToPanel("shell") },
         ui("Logcat") to { showBottomPanel(); switchToPanel("logcat"); ensureLogcatStarted() },
         ui("Device Picker") to { showDevicePicker() },
@@ -2658,6 +2650,16 @@ Long press: Toggle Shell panel"""
         }
     }
 
+    /**
+     * Engine for inline code completion. The old bottom-panel AI owned this
+     * job; with the panel gone the editor keeps its own engine, created on
+     * first use. (Behavior parity note: OcEngine.provider is never populated,
+     * so this path reported "No AI provider" before this change as well.)
+     */
+    private val completionEngine: com.aide.mobilestudio.ai.opencode.agent.OcEngine by lazy {
+        com.aide.mobilestudio.ai.opencode.agent.OcEngine(applicationContext).apply { reloadConfig() }
+    }
+
     private fun requestAiCompletion() {
         val text = codeEditor.text ?: return
         val cursor = codeEditor.selectionStart.coerceIn(0, text.length)
@@ -2670,11 +2672,9 @@ Long press: Toggle Shell panel"""
         }
         
         codeEditor.setGhostText("Thinking...")
+        val engine = completionEngine // initialise on the UI thread, use below
         
         scope.launch(Dispatchers.IO) {
-            val aiPanel = aiAgentPanel
-            val engine = aiPanel?.engine ?: return@launch
-            
             val prompt = """
                 Complete the following code. Only output the completion, no explanations.
                 
@@ -5047,7 +5047,6 @@ Long press: Toggle Shell panel"""
         val tabProblems = findViewById<TextView>(R.id.tab_problems)
         val tabSearch = findViewById<TextView>(R.id.tab_search)
         val tabShell = findViewById<TextView>(R.id.tab_shell)
-        val tabAi = findViewById<TextView>(R.id.tab_ai)
         val btnClear = findViewById<ImageButton>(R.id.btn_clear_panel)
         val btnHide = findViewById<ImageButton>(R.id.btn_hide_panel)
 
@@ -5057,17 +5056,15 @@ Long press: Toggle Shell panel"""
             R.id.tab_logcat to "#E5C07B",
             R.id.tab_problems to "#E06C75",
             R.id.tab_search to "#61AFEF",
-            R.id.tab_shell to "#C678DD",
-            R.id.tab_ai to "#4F8EF7"
+            R.id.tab_shell to "#C678DD"
         )
 
         fun selectTab(active: TextView) {
             val color = tabColors[active.id] ?: "#61AFEF"
-            // listOF, not listOF: search and AI now live on the left rail, so
-            // their tabs are absent from the row and findViewById hands back
-            // null for them. One missing tab used to take the whole activity
-            // down with it.
-            listOfNotNull(tabBuild, tabLogcat, tabProblems, tabSearch, tabShell, tabAi).forEach { tab ->
+            // listOfNotNull, not listOf: search has no tab in the row (it lives
+            // on the left rail) so findViewById hands back null for it. One
+            // missing tab used to take the whole activity down with it.
+            listOfNotNull(tabBuild, tabLogcat, tabProblems, tabSearch, tabShell).forEach { tab ->
                 if (tab.id == active.id) {
                     if (StudioUi.shouldAnimate(this@MainActivity)) {
                         val fromColor = tab.currentTextColor
@@ -5159,12 +5156,6 @@ Long press: Toggle Shell panel"""
             terminalTabManager?.scrollToBottom()
         }
 
-        tabAi?.apply {
-            setOnClickListener {
-                selectTab(this)
-                switchToPanel("ai")
-            }
-        }
         buildOutput.setOnLongClickListener {
             showOutputFullscreen(AppLanguage.literal(this, "Build Output"), buildOutput.currentText())
             true
@@ -7279,8 +7270,7 @@ Long press: Toggle Shell panel"""
     }
 
     internal fun launchAiAssistant() {
-        showBottomPanel()
-        switchToPanel("ai")
+        openAiWorkspace()
     }
 
     private fun openProject(dir: File) = openProject(dir, askConfirmation = true)
@@ -8028,10 +8018,12 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
 
     private fun askAiAboutFile(file: File) {
         val content = runCatching { file.readText() }.getOrElse { "Failed to read file" }
-        showBottomPanel()
-        switchToPanel("ai")
-        aiAgentPanel.updateFileContext(file.absolutePath, content, null)
-        aiAgentPanel.engine.sendMessage("Explain this file: ${file.name}\n\n```${file.extension}\n$content\n```")
+        com.aide.mobilestudio.ai.ui.AiWorkspaceActivity.start(
+            this,
+            currentProjectDir?.absolutePath,
+            file.absolutePath,
+            initialMessage = "Explain this file: ${file.name}\n\n```${file.extension}\n$content\n```",
+        )
     }
 
     private fun contextualCreateLabel(dir: File): String = when (contextualTemplateKind(dir)) {
@@ -8543,10 +8535,12 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
     }
 
     fun sendCrashToAI(crashLog: String) {
-        showBottomPanel()
-        switchToPanel("ai")
-        aiAgentPanel.engine.sendMessage(
-            "Analyze this crash and suggest fixes:\n\n```\n$crashLog\n```"
+        // The old bottom panel was half-height and could not show the crash
+        // analysis next to the editor; hand it to the full workspace instead.
+        com.aide.mobilestudio.ai.ui.AiWorkspaceActivity.start(
+            this,
+            currentProjectDir?.absolutePath,
+            initialMessage = "Analyze this crash and suggest fixes:\n\n```\n$crashLog\n```",
         )
     }
 
@@ -9531,7 +9525,6 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             "problems" to problemsContainer,
             "search" to findViewById<View>(R.id.search_panel),
             "shell" to findViewById<View>(R.id.shell_panel),
-            "ai" to aiAgentPanel
         )
         val targetView = panels[name] ?: return
         val shouldAnimate = StudioUi.shouldAnimate(this) && targetView.visibility != View.VISIBLE
@@ -9546,13 +9539,6 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
                 .start()
         } else {
             targetView.visibility = View.VISIBLE
-        }
-
-        // Update AI file context when switching to AI panel
-        if (name == "ai" && currentFile != null) {
-            val content = currentFile?.readText() ?: ""
-            val selection = getSelectedText()
-            aiAgentPanel.updateFileContext(currentFile?.absolutePath, content, selection)
         }
 
         if (name == "shell") {
@@ -9596,7 +9582,6 @@ if (name == "logcat") {
             "problems" -> R.id.tab_problems
             "search" -> R.id.tab_search
             "shell" -> R.id.tab_shell
-            "ai" -> R.id.tab_ai
             else -> return
         }
         val color = when (name) {
@@ -9609,7 +9594,7 @@ if (name == "logcat") {
         }
         val tabIds = listOf(
             R.id.tab_build, R.id.tab_logcat, R.id.tab_problems,
-            R.id.tab_search, R.id.tab_shell, R.id.tab_ai
+            R.id.tab_search, R.id.tab_shell
         )
         tabIds.forEach { id ->
             val tab = findViewById<TextView>(id) ?: return@forEach

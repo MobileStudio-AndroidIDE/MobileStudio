@@ -1553,10 +1553,6 @@ addView(LinearLayout(this@buildBottomPanel).apply {
                     })
                 })
             }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            addView(com.aide.mobilestudio.ai.ui.AiAgentPanel(this@buildBottomPanel).apply {
-                id = R.id.ai_agent_panel
-                visibility = View.GONE
-            }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
     root.addView(panelContent, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
     // Dynamic height: 50% of screen height, clamped between 300dp and 800dp
@@ -2194,8 +2190,7 @@ private fun Context.panelTab(viewId: Int, label: String, selected: Boolean = fal
         R.id.tab_logcat to "\uD83D\uDC31",
         R.id.tab_problems to "\u2716",
         R.id.tab_search to "\uD83D\uDD0D",
-        R.id.tab_shell to ">_",
-        R.id.tab_ai to "\u2728"
+        R.id.tab_shell to ">_"
     )
     
     return TextView(this).apply {

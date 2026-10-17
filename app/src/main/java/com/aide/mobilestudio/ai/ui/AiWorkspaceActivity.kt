@@ -79,6 +79,14 @@ class AiWorkspaceActivity : AppCompatActivity() {
         const val EXTRA_CURRENT_FILE = "current_file"
 
         /**
+         * Message submitted to the agent as soon as the workspace opens. Used
+         * by editor actions that used to type into the old bottom-panel AI
+         * ("Explain this file", crash analysis) so they land in the workspace
+         * conversation instead.
+         */
+        const val EXTRA_INITIAL_MESSAGE = "initial_message"
+
+        /**
          * Extra consumed by MainActivity's onCreate ("open_file" → open that
          * absolute path in the editor, optionally with "open_line"). Used by
          * [openInEditor]; no MainActivity change is required for it.
@@ -92,8 +100,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         private const val REQUEST_MIC = 4002
 
         /**
-         * Open the full-screen AI workspace - the primary AI surface (the
-         * bottom-panel AI tab stays available but is only half the screen).
+         * Open the full-screen AI workspace - the primary AI surface.
          *
          * @param projectDir  project root the agent operates on; the editor
          *   AI button passes the open project here.
@@ -101,11 +108,20 @@ class AiWorkspaceActivity : AppCompatActivity() {
          *   conversational context. Optional with a null default so existing
          *   callers keep compiling; callers wanting file context add the
          *   argument (see [EXTRA_CURRENT_FILE]).
+         * @param initialMessage prompt submitted right after the workspace
+         *   opens (see [EXTRA_INITIAL_MESSAGE]); null leaves the composer to
+         *   the user.
          */
-        fun start(context: Context, projectDir: String? = null, currentFile: String? = null) {
+        fun start(
+            context: Context,
+            projectDir: String? = null,
+            currentFile: String? = null,
+            initialMessage: String? = null,
+        ) {
             val intent = Intent(context, AiWorkspaceActivity::class.java)
             if (projectDir != null) intent.putExtra(EXTRA_PROJECT_DIR, projectDir)
             if (currentFile != null) intent.putExtra(EXTRA_CURRENT_FILE, currentFile)
+            if (!initialMessage.isNullOrBlank()) intent.putExtra(EXTRA_INITIAL_MESSAGE, initialMessage)
             context.startActivity(intent)
         }
     }
@@ -173,9 +189,14 @@ class AiWorkspaceActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var projectText: TextView
     private lateinit var statusPill: TextView
+    private lateinit var tokenCounter: TextView
     private lateinit var railRow: LinearLayout
     private lateinit var content: FrameLayout
     private lateinit var statusBar: TextView
+
+    // assistant header chips (kept so pickers can refresh their labels)
+    private lateinit var agentChip: TextView
+    private lateinit var modelChip: TextView
 
     // project file browser (프로젝트 rail destination)
     private var browseDir: File? = null
@@ -200,6 +221,20 @@ class AiWorkspaceActivity : AppCompatActivity() {
     private var thinkDots = 0
     private var thinkBase = "Ready"
 
+    // Generation speed (t/s), ported from the old bottom-panel counter: the
+    // clock starts when the engine enters GENERATING and the character count
+    // is the length of the streamed reply, which onMessage hands over in full
+    // on every chunk. Tokens are estimated the same way as everywhere else in
+    // the app - four characters to the token.
+    private var rateStartMs = 0L
+    private var rateChars = 0L
+    private var lastTokensPerSec = 0.0
+    private var lastRatePaintMs = 0L
+    private val tokensPerChar = 4.0
+
+    // onMessage arrives once per streamed chunk, well above reading speed.
+    private val ratePaintIntervalMs = 200L
+
     // --- slash commands + @file mentions + context badge ---
     private val slashRegistry = SlashCommandRegistry()
     private var slashPopup: ListPopupWindow? = null
@@ -212,6 +247,10 @@ class AiWorkspaceActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Belt and braces with MobileStudioApp: the workspace is the single AI
+        // surface now and must be able to reach the local runtime even if the
+        // Application-level init is ever lost.
+        com.aide.mobilestudio.ai.LlamaRuntimeManager.initAppContext(applicationContext)
         // The base context is attached by the time onCreate runs, so the
         // engine/storage may safely touch filesDir and SharedPreferences here.
         engine = OcEngine(this)
@@ -237,8 +276,15 @@ class AiWorkspaceActivity : AppCompatActivity() {
         setupEngine()
         resumeLatestSessionOrStartNew()
         renderSessionHistory()
+        resumedSessionTitle?.let {
+            addSystemBubble(t("Resumed previous conversation", "이전 대화를 복원했습니다") + ": " + it)
+        }
         showTab(Tab.CHAT)
         updateModelLabel()
+
+        // Editor actions (explain file / crash report) used to type into the
+        // old bottom-panel AI; they now hand the prompt over to this screen.
+        intent.getStringExtra(EXTRA_INITIAL_MESSAGE)?.takeIf { it.isNotBlank() }?.let { submit(it) }
 
         if (projectDir != null) {
             scope.launch {
@@ -266,8 +312,16 @@ class AiWorkspaceActivity : AppCompatActivity() {
     private fun resumeLatestSessionOrStartNew() {
         if (engine.currentSessionId() != null) return
         val latest = engine.listSessions(includeArchived = false).firstOrNull()
-        if (latest == null) engine.newSession() else engine.loadSession(latest.id)
+        if (latest == null) {
+            engine.newSession()
+        } else {
+            engine.loadSession(latest.id)
+            resumedSessionTitle = latest.title
+        }
     }
+
+    /** Title of the stored session resumed on launch, shown once after render. */
+    private var resumedSessionTitle: String? = null
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -380,11 +434,19 @@ class AiWorkspaceActivity : AppCompatActivity() {
         modelText = TextView(this).apply {
             setTextColor(p.accent)
             textSize = StudioUi.TypeSmall
-            setOnClickListener { showTab(Tab.MODELS) }
+            setOnClickListener { showModelPicker() }
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        tokenCounter = TextView(this).apply {
+            this.text = "— t/s"
+            setTextColor(p.muted)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(6), 0, dp(8), 0)
         }
         statusPill = AiUiKit.pill(this, t("Ready", "대기"), p.surface2, p.textSoft)
         row2.addView(modelText)
+        row2.addView(tokenCounter)
         row2.addView(statusPill)
         column.addView(row2)
 
@@ -514,8 +576,18 @@ class AiWorkspaceActivity : AppCompatActivity() {
             setTypeface(null, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
+        // Start a fresh conversation without hunting through the Sessions tab.
+        row.addView(
+            AiUiKit.actionChip(this, "＋") { _ -> newChat() }.apply {
+                contentDescription = t("New chat", "새 대화")
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginEnd = dp(6) },
+        )
         // Agent mode (build / plan / ...) — OpenCode-style agent switching.
-        val agentChip = AiUiKit.pill(this, engine.currentAgentName(), AiUiKit.withAlpha(p.accent, 0.15f), p.accent)
+        agentChip = AiUiKit.pill(this, engine.currentAgentName(), AiUiKit.withAlpha(p.accent, 0.15f), p.accent)
         agentChip.setOnClickListener { showAgentPicker() }
         row.addView(
             agentChip,
@@ -541,8 +613,8 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply { marginEnd = dp(6) },
         )
-        val modelChip = AiUiKit.pill(this, engine.currentModelLabel(), p.surface2, p.accent)
-        modelChip.setOnClickListener { showTab(Tab.MODELS) }
+        modelChip = AiUiKit.pill(this, compactModelLabel(), p.surface2, p.accent)
+        modelChip.setOnClickListener { showModelPicker() }
         row.addView(modelChip)
         return row
     }
@@ -559,11 +631,71 @@ class AiWorkspaceActivity : AppCompatActivity() {
             .setTitle(t("Agent", "에이전트"))
             .setSingleChoiceItems(names, names.indexOf(current)) { dialog, which ->
                 engine.setAgent(names[which])
+                if (::agentChip.isInitialized) agentChip.text = engine.currentAgentName()
                 dialog.dismiss()
                 showTab(Tab.CHAT)
             }
             .setNegativeButton(t("Cancel", "취소"), null)
             .show()
+    }
+
+    /**
+     * Model picker for the header chip: switches to the unified Models tab,
+     * where every provider's models sit in one list with context limits and
+     * the current one checked, next to keys, endpoints and fetch.
+     */
+    private fun showModelPicker() {
+        // The chip opens the unified picker tab: API models, installed GGUFs
+        // and Hugging Face downloads in one place, with a safe switch that
+        // reverts to the previous model when the new one cannot be created.
+        showTab(Tab.MODELS)
+    }
+
+    /** Model label short enough for the assistant header chip. */
+    private fun compactModelLabel(): String {
+        val ref = runCatching { engine.currentModelRef() }.getOrNull() ?: return engine.currentModelLabel()
+        val id = ref.modelID.substringAfterLast('/')
+        val short = if (id.length > 18) id.take(17) + "…" else id
+        return "${ref.providerID}/$short"
+    }
+
+    /** Fresh conversation: stop the current turn, new engine session, empty chat. */
+    private fun newChat() {
+        runCatching { engine.stop() }
+        runCatching { engine.newSession() }
+        changedFiles.clear()
+        runCatching { validation.reset() }
+        streamingView = null
+        streamingCard = null
+        chatMessages.removeAllViews()
+        thinkingView.visibility = View.GONE
+        contextBadge.visibility = View.GONE
+        renderSessionHistory()
+        resetTokenCounter()
+        showTab(Tab.CHAT)
+    }
+
+    private fun resetTokenCounter() {
+        rateStartMs = 0L
+        rateChars = 0L
+        lastTokensPerSec = 0.0
+        if (::tokenCounter.isInitialized) tokenCounter.text = "— t/s"
+    }
+
+    private fun updateTokenCount() {
+        if (!::tokenCounter.isInitialized) return
+        val live = rateStartMs > 0
+        val rate = if (live) {
+            val elapsedSec = (System.currentTimeMillis() - rateStartMs).coerceAtLeast(1L) / 1000.0
+            (rateChars / tokensPerChar) / elapsedSec
+        } else {
+            lastTokensPerSec
+        }
+        tokenCounter.text = if (rate > 0) {
+            String.format(Locale.US, "%.1f t/s", rate)
+        } else {
+            "— t/s"
+        }
     }
 
     /** AI destination: header + (채팅/계획/프로젝트/도구) segmented bar + content. */
@@ -791,11 +923,23 @@ class AiWorkspaceActivity : AppCompatActivity() {
             textSize = StudioUi.TypeBody
             maxLines = 6
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            imeOptions = EditorInfo.IME_ACTION_SEND
             background = AiUiKit.rounded(p.surface2, dp(14), strokeColor = p.border, strokePx = dp(1))
             setPadding(dp(14), dp(10), dp(14), dp(10))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_SEND) { send(); true } else false
+            }
+            // Multi-line composer: Enter sends, Shift+Enter (hardware
+            // keyboards) inserts a newline. Without this the IME's Enter key
+            // only ever produced newlines and the send action never fired.
+            setOnKeyListener { _, keyCode, event ->
+                if (keyCode == android.view.KeyEvent.KEYCODE_ENTER &&
+                    event.action == android.view.KeyEvent.ACTION_DOWN &&
+                    !event.isShiftPressed
+                ) {
+                    send(); true
+                } else false
             }
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -1004,13 +1148,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
         when (command.action) {
             SlashCommandAction.HELP -> addSystemBubble(SlashCommandRegistry.helpText())
             SlashCommandAction.CLEAR -> confirmClearConversation()
-            SlashCommandAction.NEW_SESSION -> {
-                engine.newSession()
-                changedFiles.clear()
-                validation.reset()
-                renderSessionHistory()
-                showTab(Tab.CHAT)
-            }
+            SlashCommandAction.NEW_SESSION -> newChat()
             SlashCommandAction.SHOW_SESSIONS -> showTab(Tab.SESSIONS)
             SlashCommandAction.SHOW_MODELS -> showTab(Tab.MODELS)
             SlashCommandAction.TOGGLE_PLAN -> togglePlanMode()
@@ -1052,9 +1190,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 ),
             )
             .setPositiveButton(t("Clear", "지우기")) { _, _ ->
-                engine.newSession()
-                changedFiles.clear()
-                renderSessionHistory()
+                newChat()
                 addSystemBubble(t("Conversation cleared.", "대화가 지워졌습니다."))
             }
             .setNegativeButton(t("Cancel", "취소"), null)
@@ -1424,9 +1560,26 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 // Plain text while streaming (cheap); markdown once the turn ends.
                 streamingView?.text = if (isComplete) AiMarkdown.render(this@AiWorkspaceActivity, text) else text
                 scrollChatToBottom()
+                // onMessage hands over the whole reply so far, not a delta, so
+                // the character count is just its length. The clock starts on
+                // the first streamed chunk, not at the GENERATING state: the
+                // local runtime prefills the prompt inside that state and a
+                // clock started there would report prefill+decode, not t/s.
+                rateChars = text.length.toLong()
+                if (rateStartMs == 0L) {
+                    rateStartMs = System.currentTimeMillis()
+                    lastRatePaintMs = 0L
+                }
                 if (isComplete) {
                     streamingView = null
                     streamingCard = null
+                    updateTokenCount()
+                } else if (rateStartMs > 0) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastRatePaintMs >= ratePaintIntervalMs) {
+                        lastRatePaintMs = now
+                        updateTokenCount()
+                    }
                 }
             }
 
@@ -1468,6 +1621,20 @@ class AiWorkspaceActivity : AppCompatActivity() {
 
             override fun onStateChange(state: OcEngine.AgentState) = runOnUiThread {
                 engineState = state
+                // Stop the rate clock the moment the engine leaves GENERATING,
+                // freezing the finished turn's average on screen instead of
+                // blanking it. (It was started by the first streamed chunk.)
+                if (state == OcEngine.AgentState.GENERATING && rateStartMs == 0L) {
+                    // The local runtime prefills inside GENERATING; until the
+                    // first chunk the previous turn's frozen value would be
+                    // misleading, so show that a measurement is in progress.
+                    if (::tokenCounter.isInitialized) tokenCounter.text = "…"
+                } else if (state != OcEngine.AgentState.GENERATING && rateStartMs > 0L) {
+                    val elapsedSec = (System.currentTimeMillis() - rateStartMs).coerceAtLeast(1L) / 1000.0
+                    lastTokensPerSec = (rateChars / tokensPerChar) / elapsedSec
+                    rateStartMs = 0L
+                    updateTokenCount()
+                }
                 sendButton.text = if (state == OcEngine.AgentState.GENERATING || state == OcEngine.AgentState.THINKING)
                     t("Stop", "중지") else t("Send", "전송")
                 val p = StudioUi.palette
@@ -2380,12 +2547,8 @@ class AiWorkspaceActivity : AppCompatActivity() {
         }
         column.addView(sectionTitle(t("Sessions", "세션")))
         column.addView(AiUiKit.primaryButton(this, t("+ New session", "+ 새 세션")) {
-            engine.newSession()
-            changedFiles.clear()
-            validation.reset()
+            newChat()
             if (projectDir != null) scheduleValidation(immediate = true)
-            renderSessionHistory()
-            showTab(Tab.CHAT)
         })
         val search = EditText(this).apply {
             hint = t("Search sessions…", "세션 검색…")

@@ -49,11 +49,14 @@ object ToolRegistry {
     // --- Listener for streaming command output to UI ---
     var commandOutputListener: ((commandId: String, line: String) -> Unit)? = null
 
-    // --- Hooks for tools that need UI or the agent engine (set once by panel/engine) ---
-    /** Blocks until the user answers. Set by AiAgentPanel. */
+    // --- Hooks for tools that need UI or the agent engine (legacy chat set these) ---
+    // The bottom-panel chat and its engine were removed; nothing wires these
+    // any more, so the tools report their "no UI / sub-agent unavailable"
+    // fallbacks. The workspace answers questions through OcEngine.onAskQuestion.
+    /** Answers a question from the "question" tool. Set by the legacy chat UI. */
     @Volatile
     var questionHandler: ((question: String, options: List<String>) -> String)? = null
-    /** Runs a read-only sub-agent. Set by AiAgentEngine. */
+    /** Runs a read-only sub-agent. Set by the legacy agent engine. */
     @Volatile
     var taskHandler: ((prompt: String, contextInfo: String) -> String)? = null
 

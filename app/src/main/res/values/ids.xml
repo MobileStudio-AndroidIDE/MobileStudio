@@ -121,8 +121,6 @@
     <item name="project_tab_scroll" type="id" />
     <item name="tab_search" type="id" />
     <item name="tab_shell" type="id" />
-    <item name="tab_ai" type="id" />
-    <item name="ai_agent_panel" type="id" />
     <item name="ai_agent_output" type="id" />
     <item name="ai_agent_input" type="id" />
     <item name="ai_agent_send" type="id" />
