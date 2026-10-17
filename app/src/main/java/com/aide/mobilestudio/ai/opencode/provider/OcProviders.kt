@@ -827,6 +827,11 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
         var isInPlan = false
         var toolCallBuffer = StringBuilder()
         var isInToolCall = false
+        // What the reply said in prose, and whether any call came out of it.
+        // A model that answers with the call alone - no wire markers - is
+        // recovered from these once the stream ends.
+        var emittedToolCall = false
+        val streamedText = StringBuilder()
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             val result = generate(prompt, temp) { token ->
@@ -859,6 +864,7 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                         toolCallBuffer.append(current.substringBefore(TOOL_CLOSE))
                         val json = parseToolCallJson(toolCallBuffer.toString())
                         if (json != null) {
+                            emittedToolCall = true
                             trySend(
                                 AIProvider.StreamEvent.ToolCall(
                                     json.optString("name"),
@@ -873,6 +879,7 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                     }
                     return@generate true
                 }
+                streamedText.append(current)
                 trySend(AIProvider.StreamEvent.Text(current))
                 true
             }
@@ -883,6 +890,7 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                 val raw = toolCallBuffer.toString()
                 val json = parseToolCallJson(raw)
                 if (json != null) {
+                    emittedToolCall = true
                     Log.w("OcLocalLlamaProvider", "Recovered tool call with no closing marker: " + raw.take(200))
                     trySend(
                         AIProvider.StreamEvent.ToolCall(
@@ -897,6 +905,25 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                 }
                 isInToolCall = false
                 toolCallBuffer = StringBuilder()
+            }
+            if (!emittedToolCall) {
+                // Some local models never use the wire markers: they answer
+                // with the call as a fenced ```json block, or as the bare
+                // object. That reply used to stay on screen as text while
+                // nothing ran - the user asked for `ls` and got "bash ls".
+                val markerless = parseMarkerlessToolCall(streamedText.toString())
+                if (markerless != null) {
+                    Log.w(
+                        "OcLocalLlamaProvider",
+                        "Recovered markerless tool call: " + markerless.toString().take(200),
+                    )
+                    trySend(
+                        AIProvider.StreamEvent.ToolCall(
+                            markerless.optString("name"),
+                            markerless.optJSONObject("arguments") ?: JSONObject(),
+                        ),
+                    )
+                }
             }
             if (result != null && result.startsWith("Error")) {
                 trySend(AIProvider.StreamEvent.Error(result))
@@ -1064,6 +1091,54 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
         }
         Log.w("OcLocalLlamaProvider", "Unreadable tool call: " + raw.take(200))
         return null
+    }
+
+    /**
+     * Recognizes a call that arrives without the wire markers.
+     *
+     * Observed from the local model: asked to run `ls` it answered with a
+     * ```json fenced object, or with the bare {"name": ..., "arguments": ...} -
+     * never the 🤖 form. That reply stayed on screen as prose while nothing
+     * ran. Only a reply that is *nothing but* the call is accepted: a tutorial
+     * quoting a call in passing has a second fence (or prose around the
+     * object) and stays prose, because obeying every JSON snippet a model
+     * explains would run work nobody asked for.
+     */
+    private fun parseMarkerlessToolCall(text: String): JSONObject? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        val body = if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+            // Exactly one fenced block: more backticks means the reply embedded
+            // the call in a longer answer.
+            if (trimmed.count { it == '`' } != 6) return null
+            val inner = trimmed.removePrefix("```").removeSuffix("```").trim()
+            // Drop a language tag ("json") before the object when present.
+            if (inner.startsWith("{")) inner else inner.substringAfter('\n', "").trim()
+        } else {
+            trimmed
+        }
+        if (!body.startsWith("{") || !body.endsWith("}")) return null
+        val json = runCatching { JSONObject(body) }.getOrNull()
+            ?: repairLooseCall(body)
+            ?: return null
+        if (json.optString("name").isEmpty() || !json.has("arguments")) return null
+        return json
+    }
+
+    /**
+     * One more shape the local model produces: {:name="write", "arguments":
+     * {...}} - a dropped quote, and '=' where ':' belongs. Seen on device right
+     * after a correct ```json answer, so it is a formatting slip rather than a
+     * different intent. Only that pattern is repaired, and only inside a reply
+     * that already looked like a lone call.
+     */
+    private fun repairLooseCall(body: String): JSONObject? {
+        if (!body.contains('=')) return null
+        val repaired = body
+            .replaceFirst(Regex("""\{\s*:?\s*"?name"?\s*[:=]\s*"""), "{\"name\": ")
+            .replaceFirst(Regex("""([,{])\s*"?arguments"?\s*[:=]\s*"""), "${'$'}1\"arguments\": ")
+        if (repaired == body) return null
+        return runCatching { JSONObject(repaired) }.getOrNull()
     }
 
     override fun getCapabilities(): JSONObject = JSONObject().apply {
