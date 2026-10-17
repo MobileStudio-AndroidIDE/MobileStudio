@@ -137,6 +137,36 @@ extern "C" JNIEXPORT void JNICALL Java_com_aide_mobilestudio_ai_api_LlamaAndroid
     }
 }
 
+// A byte-level BPE token can end in the middle of a multi-byte UTF-8
+// character - the remaining bytes arrive with the next token - and
+// NewStringUTF() aborts the whole process under CheckJNI when it sees such a
+// truncated sequence ("input is not valid Modified UTF-8"). This copies the
+// leading bytes of `in` that form complete, valid UTF-8 sequences into `out`,
+// reports how many bytes of `in` that accounts for, and turns any invalid byte
+// into U+FFFD rather than passing it on.
+static void utf8_whole_prefix(const std::string& in, std::string& out, size_t& consumed) {
+    consumed = 0;
+    size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        size_t need;
+        if (c < 0x80) need = 1;
+        else if ((c & 0xE0) == 0xC0) need = 2;
+        else if ((c & 0xF0) == 0xE0) need = 3;
+        else if ((c & 0xF8) == 0xF0) need = 4;
+        else { out += "\xEF\xBF\xBD"; ++i; consumed = i; continue; }
+        if (i + need > in.size()) break;  // character not complete yet
+        bool ok = true;
+        for (size_t k = 1; k < need; ++k) {
+            if ((static_cast<unsigned char>(in[i + k]) & 0xC0) != 0x80) { ok = false; break; }
+        }
+        if (!ok) { out += "\xEF\xBF\xBD"; ++i; consumed = i; continue; }
+        out.append(in, i, need);
+        i += need;
+        consumed = i;
+    }
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_com_aide_mobilestudio_ai_api_LlamaAndroid_generate(
         JNIEnv *env, jobject thiz, jlong handle, jstring jprompt,
         jfloat temp, jfloat top_p, jint top_k, jfloat repeat_penalty, jint seed,
@@ -228,6 +258,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_aide_mobilestudio_ai_api_LlamaAndr
     LOGI("Prompt decoded successfully. Starting generation loop.");
 
     std::string full_response;
+    std::string pending;  // bytes of a character whose remaining bytes have not arrived yet
 
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
     for (int i = 0; i < 2048; ++i) {
@@ -243,18 +274,24 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_aide_mobilestudio_ai_api_LlamaAndr
         if (n <= 0) break;
 
         std::string piece(buf, n);
-        full_response += piece;
-
         if (i < 5) LOGI("Token %d: [%s]", i, piece.c_str());
 
-        jstring jtoken = env->NewStringUTF(piece.c_str());
-        jobject res = env->CallObjectMethod(callback, cb_method, jtoken);
-        env->DeleteLocalRef(jtoken);
+        pending += piece;
+        std::string ready;
+        size_t consumed = 0;
+        utf8_whole_prefix(pending, ready, consumed);
+        if (consumed > 0) pending.erase(0, consumed);
+        full_response += ready;
+        if (!ready.empty()) {
+            jstring jtoken = env->NewStringUTF(ready.c_str());
+            jobject res = env->CallObjectMethod(callback, cb_method, jtoken);
+            env->DeleteLocalRef(jtoken);
 
-        if (res) {
-            jboolean cont = env->CallBooleanMethod(res, boolean_value_method);
-            env->DeleteLocalRef(res);
-            if (!cont) break;
+            if (res) {
+                jboolean cont = env->CallBooleanMethod(res, boolean_value_method);
+                env->DeleteLocalRef(res);
+                if (!cont) break;
+            }
         }
 
         // Decode next token using batch_get_one
@@ -266,6 +303,23 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_aide_mobilestudio_ai_api_LlamaAndr
         if (gen_res) {
             LOGE("llama_decode failed in generation loop at step %d, code: %d", i, gen_res);
             break;
+        }
+    }
+
+    if (!pending.empty()) {
+        // Generation ended on a half character: forward what is whole and let
+        // U+FFFD stand in for the rest instead of handing Modified UTF-8 an
+        // invalid sequence.
+        std::string tail;
+        size_t consumed = 0;
+        utf8_whole_prefix(pending, tail, consumed);
+        if (consumed < pending.size()) tail += "\xEF\xBF\xBD";
+        full_response += tail;
+        if (!tail.empty()) {
+            jstring jtoken = env->NewStringUTF(tail.c_str());
+            jobject res = env->CallObjectMethod(callback, cb_method, jtoken);
+            env->DeleteLocalRef(jtoken);
+            if (res) env->DeleteLocalRef(res);
         }
     }
 

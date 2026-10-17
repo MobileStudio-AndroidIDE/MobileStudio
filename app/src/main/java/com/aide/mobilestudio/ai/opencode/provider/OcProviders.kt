@@ -857,11 +857,11 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                 if (isInToolCall) {
                     if (current.contains(TOOL_CLOSE)) {
                         toolCallBuffer.append(current.substringBefore(TOOL_CLOSE))
-                        runCatching {
-                            val json = JSONObject(toolCallBuffer.toString())
+                        val json = parseToolCallJson(toolCallBuffer.toString())
+                        if (json != null) {
                             trySend(
                                 AIProvider.StreamEvent.ToolCall(
-                                    json.getString("name"),
+                                    json.optString("name"),
                                     json.optJSONObject("arguments") ?: JSONObject(),
                                 ),
                             )
@@ -875,6 +875,28 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                 }
                 trySend(AIProvider.StreamEvent.Text(current))
                 true
+            }
+            if (isInToolCall && toolCallBuffer.isNotEmpty()) {
+                // Small models often stop right after the JSON without the
+                // closing marker. The buffer used to be dropped here: the
+                // turn recorded an empty message and the user saw nothing.
+                val raw = toolCallBuffer.toString()
+                val json = parseToolCallJson(raw)
+                if (json != null) {
+                    Log.w("OcLocalLlamaProvider", "Recovered tool call with no closing marker: " + raw.take(200))
+                    trySend(
+                        AIProvider.StreamEvent.ToolCall(
+                            json.optString("name"),
+                            json.optJSONObject("arguments") ?: JSONObject(),
+                        ),
+                    )
+                } else {
+                    // Started like a call but is not one: show it instead of
+                    // silently dropping the whole turn.
+                    trySend(AIProvider.StreamEvent.Text(TOOL_OPEN + raw))
+                }
+                isInToolCall = false
+                toolCallBuffer = StringBuilder()
             }
             if (result != null && result.startsWith("Error")) {
                 trySend(AIProvider.StreamEvent.Error(result))
@@ -912,6 +934,17 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
             head.append("\nAvailable tools: ").append(tools.toString()).append("\n")
             head.append("To call a tool, use: ").append(TOOL_OPEN)
                 .append("{\"name\": \"...\", \"arguments\": {...}}").append(TOOL_CLOSE).append("\n")
+            // Policy text alone was not enough for small local models: asked
+            // to create or run something they answered with a tutorial. Two
+            // concrete calls in the exact wire shape give them something to
+            // copy, which is the cheapest lever on a 1B model.
+            head.append("When the user asks for a change, a command or a check, reply with a tool call only.\n")
+            head.append("Example - user says 'create hello.js that prints hi': reply ").append(TOOL_OPEN)
+                .append("{\"name\": \"write\", \"arguments\": {\"filePath\": \"hello.js\", \"content\": \"console.log('hi')\"}}")
+                .append(TOOL_CLOSE).append("\n")
+            head.append("Example - user says 'run the project tests': reply ").append(TOOL_OPEN)
+                .append("{\"name\": \"bash\", \"arguments\": {\"command\": \"npm test\"}}")
+                .append(TOOL_CLOSE).append("\n")
         }
         head.append("<|im_end|>\n")
 
@@ -1009,6 +1042,28 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
             tail = text.takeLast(chars)
         }
         return tail
+    }
+
+    /**
+     * A small model can wrap its call in a fence, leave trailing text, or
+     * truncate the JSON. Try the text as-is and then the outermost {...} it
+     * contains, and log what could not be read: a dropped call used to look
+     * exactly like the model refusing to act, with nothing in the log.
+     */
+    private fun parseToolCallJson(raw: String): JSONObject? {
+        val trimmed = raw.trim()
+            .removePrefix("```json").removePrefix("```")
+            .removeSuffix("```").trim()
+        val candidates = mutableListOf(trimmed)
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        if (start >= 0 && end > start) candidates.add(trimmed.substring(start, end + 1))
+        for (candidate in candidates) {
+            val json = runCatching { JSONObject(candidate) }.getOrNull()
+            if (json != null && json.optString("name").isNotEmpty()) return json
+        }
+        Log.w("OcLocalLlamaProvider", "Unreadable tool call: " + raw.take(200))
+        return null
     }
 
     override fun getCapabilities(): JSONObject = JSONObject().apply {
