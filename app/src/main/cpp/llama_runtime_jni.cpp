@@ -422,9 +422,14 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeLoadModel(
 
     llama_context_params ctx_params = p_llama_context_default_params();
     ctx_params.n_ctx = n_ctx;
-    // Decode the prompt through the stable single-token path (reliable on mobile)
-    ctx_params.n_batch = 1;
-    ctx_params.n_ubatch = 1;
+    // Prompt prefill runs in chunks of n_batch (see the decode loop below).
+    // n_batch = 1 turned every chunk into a single token, so the "batched"
+    // loop still paid one transformer pass - and one full vocab projection -
+    // per prompt token: measured ~20 tok/s on device, which is minutes of
+    // waiting for an ordinary prompt. 256 lets the backend evaluate a real
+    // batch while keeping the compute buffers small enough for a phone.
+    ctx_params.n_batch = 64;
+    ctx_params.n_ubatch = 64;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
     ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
@@ -539,15 +544,16 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeGenerate(
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
     // Feed the prompt in batches instead of one token per llama_decode.
     //
-    // With n_tokens == 1 every step is also "the last token", and llama.cpp
-    // defaults a batch without a logits array to scoring only its last token -
-    // so the single-token path emitted a full vocab projection for every one
-    // of the prompt's tokens, on top of running the transformer a token at a
-    // time. Measured on-device that came to ~20 tok/s, which put an ordinary
-    // coding prompt minutes away from its first reply. A batch pays that
-    // projection once per chunk instead, and only the final chunk's last
-    // token - the last prompt token - is what sampling reads afterwards, so
-    // the result is unchanged.
+    // The batch is built by hand instead of with llama_batch_get_one, which
+    // llama.h calls a transition aid and tells callers to avoid: that helper
+    // leaves pos and logits null, so the caller depends on implicit position
+    // tracking and on llama.cpp's default of making only the batch's last token
+    // an output row (llama-batch.cpp). Positions and output flags are stated
+    // explicitly here instead of relying on those defaults.
+    //
+    // Only the last token of each chunk asks for an output row, and only the
+    // final chunk's row - the last prompt token - is what sampling reads
+    // afterwards, so the result matches the single-token path.
     //
     // The chunk never exceeds the context's own batch limit: llama_decode
     // asserts n_tokens_all <= n_batch rather than splitting the batch, so a
@@ -555,10 +561,36 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeGenerate(
     const int32_t chunk_size = (int32_t)std::max<uint32_t>(1u, p_llama_n_batch(session->ctx));
     LOGI("Decoding prompt with %d tokens (batch=%d)", n_tokens, chunk_size);
 
+    std::vector<llama_token>   b_token(chunk_size);
+    std::vector<llama_pos>     b_pos(chunk_size);
+    std::vector<int32_t>       b_nseq(chunk_size, 1);
+    std::vector<llama_seq_id>  b_seq(chunk_size, 0);
+    std::vector<llama_seq_id*> b_seq_ptr(chunk_size);
+    std::vector<int8_t>        b_logits(chunk_size, 0);
+    for (int32_t k = 0; k < chunk_size; ++k) b_seq_ptr[k] = &b_seq[k];
+
     int32_t decoded = 0;
+    // Tokens in the final prefill batch. That chunk is what holds the prompt's
+    // output row, so it is also the batch the first sample reads from.
+    int32_t last_chunk = 0;
     for (int32_t i = 0; i < n_tokens; i += chunk_size) {
         const int32_t chunk = std::min<int32_t>(chunk_size, n_tokens - i);
-        llama_batch batch = p_llama_batch_get_one(tokens.data() + i, chunk);
+        for (int32_t k = 0; k < chunk; ++k) {
+            b_token[k] = tokens[i + k];
+            b_pos[k] = i + k;  // memory was cleared, so absolute == chunk offset
+            b_logits[k] = 0;
+        }
+        b_logits[chunk - 1] = 1;
+        last_chunk = chunk;
+
+        llama_batch batch{};
+        batch.n_tokens = chunk;
+        batch.token = b_token.data();
+        batch.embd = nullptr;
+        batch.pos = b_pos.data();
+        batch.n_seq_id = b_nseq.data();
+        batch.seq_id = b_seq_ptr.data();
+        batch.logits = b_logits.data();
         g_abort_deadline_ms.store(now_ms() + 180000);
         int decode_res = p_llama_decode(session->ctx, batch);
         g_abort_deadline_ms.store(0);
@@ -576,12 +608,24 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeGenerate(
         }
     }
     p_llama_synchronize(session->ctx);
+    if (last_chunk <= 0) {
+        LOGE("Prefill finished without a batch to sample from");
+        return env->NewStringUTF("Error: prompt prefill produced no output");
+    }
     LOGI("Prompt decoded successfully. Starting generation loop.");
 
     std::string full_response;
     std::string pending;  // bytes of a character whose remaining bytes have not arrived yet
     for (int i = 0; i < 2048; ++i) {
-        llama_token id = p_llama_sampler_sample(session->smpl, session->ctx, 0);
+        // llama_sampler_sample() takes a token index inside the last batch, not
+        // an output row: get_logits_ith() requires batch.logits[index] to be
+        // set and aborts the process otherwise ("invalid logits id 0 ... batch
+        // .logits[0] != true"). The prompt's output row belongs to the last
+        // token of the final prefill chunk, so the first sample must name that
+        // index - 0 was only ever correct while the prompt was one token per
+        // decode. Every later step decodes a one-token batch, where 0 is it.
+        const int32_t sample_idx = (i == 0) ? last_chunk - 1 : 0;
+        llama_token id = p_llama_sampler_sample(session->smpl, session->ctx, sample_idx);
         if (p_llama_vocab_is_eog(vocab, id)) {
             LOGI("EOG token hit at step %d", i);
             break;
