@@ -78,23 +78,32 @@ object GgufInfo {
                         key == "general.file_type" -> fileType = (readValue(input, type) as? Number)?.toInt()
                         // Current llama.cpp writes block_count; older files
                         // used n_layer. Both are read, the value is consumed once.
-                        key == "$architecture.block_count" || key == "general.block_count" -> {
+                        //
+                        // The match is on the suffix, not on "$architecture.": the
+                        // architecture key is not guaranteed to have been read
+                        // before the architecture's own keys, and when it had not,
+                        // every one of these came back null - a model reported
+                        // "layers: unknown" to the GPU-offload decision.
+                        key == "$architecture.block_count" || key == "general.block_count" ||
+                            key.endsWith(".block_count") -> {
                             val layers = positiveInt(readValue(input, type))
                             if (nLayer == null) nLayer = layers
                         }
-                        key == "$architecture.n_layer" || key == "general.n_layer" ->
+                        key == "$architecture.n_layer" || key == "general.n_layer" ||
+                            key.endsWith(".n_layer") ->
                             nLayer = positiveInt(readValue(input, type))
-                        key == "$architecture.context_length" || key == "general.context_length" ->
+                        key == "$architecture.context_length" || key == "general.context_length" ||
+                            key.endsWith(".context_length") ->
                             contextLength = positiveInt(readValue(input, type))
-                        key == "$architecture.attention.head_count" ->
+                        key == "$architecture.attention.head_count" || key.endsWith(".attention.head_count") ->
                             headCount = positiveInt(readValue(input, type))
-                        key == "$architecture.attention.head_count_kv" ->
+                        key == "$architecture.attention.head_count_kv" || key.endsWith(".attention.head_count_kv") ->
                             headCountKv = positiveInt(readValue(input, type))
-                        key == "$architecture.embedding_length" ->
+                        key == "$architecture.embedding_length" || key.endsWith(".embedding_length") ->
                             embeddingLength = positiveInt(readValue(input, type))
-                        key == "$architecture.attention.key_length" ->
+                        key == "$architecture.attention.key_length" || key.endsWith(".attention.key_length") ->
                             keyLength = positiveInt(readValue(input, type))
-                        key == "$architecture.attention.value_length" ->
+                        key == "$architecture.attention.value_length" || key.endsWith(".attention.value_length") ->
                             valueLength = positiveInt(readValue(input, type))
                         else -> readValue(input, type)
                     }

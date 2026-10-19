@@ -2801,8 +2801,12 @@ class AiWorkspaceActivity : AppCompatActivity() {
         val anthropicModel = field("Anthropic model", settings.anthropicModel)
         val threads = field("CPU threads", settings.nThreads.toString())
         val context = field("Context length", settings.contextLength.toString())
+        // GPU offload: layers llama.cpp places on the Vulkan GPU. 99 (or any
+        // negative value) means every layer the model has - llama.h clamps it to
+        // the real count - and 0 keeps inference on the CPU.
+        val gpuLayers = field("GPU layers (99 = all, 0 = CPU)", settings.nGpuLayers.toString())
 
-        for (v in listOf(geminiKey, geminiModel, openaiKey, openaiBase, openaiModel, anthropicKey, anthropicModel, threads, context)) {
+        for (v in listOf(geminiKey, geminiModel, openaiKey, openaiBase, openaiModel, anthropicKey, anthropicModel, threads, context, gpuLayers)) {
             column.addView(label(v.first))
             column.addView(v.second)
         }
@@ -2824,6 +2828,7 @@ class AiWorkspaceActivity : AppCompatActivity() {
                 settings.anthropicModel = anthropicModel.second.text.toString().trim().ifBlank { settings.anthropicModel }
                 settings.nThreads = threads.second.text.toString().toIntOrNull() ?: settings.nThreads
                 settings.contextLength = context.second.text.toString().toIntOrNull() ?: settings.contextLength
+                settings.nGpuLayers = gpuLayers.second.text.toString().toIntOrNull() ?: settings.nGpuLayers
                 settings.autoApplyChanges = autoApply.isChecked
                 settings.webSearchEnabled = webSearch.isChecked
                 engine.reloadConfig()
@@ -2835,6 +2840,16 @@ class AiWorkspaceActivity : AppCompatActivity() {
             t(
                 "API keys are stored in the app's encrypted preferences and are never written to logs.",
                 "API 키는 앱의 암호화된 저장소에 보관되며 로그에 남기지 않습니다."
+            ),
+        ))
+        column.addView(body(
+            t(
+                "GPU layers: 99 (or -1) puts every layer the model has on the Vulkan GPU, 0 keeps it on the CPU. " +
+                    "A device that cannot hold the model lowers the offload on its own; the layers actually " +
+                    "offloaded are reported by llama.cpp in the log.",
+                "GPU 레이어: 99(또는 -1)는 모델의 모든 레이어를 Vulkan GPU에 올리고, 0은 CPU만 사용합니다. " +
+                    "메모리가 부족한 기기에서는 오프로드 수준을 스스로 낮춥니다. 실제로 올라간 레이어 수는 " +
+                    "llama.cpp가 로그에 남깁니다.",
             ),
         ))
 

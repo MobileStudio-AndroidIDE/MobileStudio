@@ -752,7 +752,9 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
         options: JSONObject?,
     ): kotlinx.coroutines.flow.Flow<AIProvider.StreamEvent> = kotlinx.coroutines.flow.callbackFlow {
         if (modelHandle == 0L) {
-            val nGpu = options?.optInt("nGpuLayers", 32) ?: 32
+            // Negative = every layer the model has (llama.h); the runtime clamps
+            // it to the real count. 0 = CPU only.
+            val nGpu = options?.optInt("nGpuLayers", -1) ?: -1
             val nThreads = options?.optInt("nThreads", 4) ?: 4
             val backendName = options?.optString("backend", "AUTO") ?: "AUTO"
             val runtimeManager = com.aide.mobilestudio.ai.LlamaRuntimeManager.get()
@@ -786,10 +788,25 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
                         }
                         val vulkan = bridge.isVulkanAvailable()
                         val ctx = (model.contextLimit ?: model.contextLength).coerceIn(512, OcContextBudget.LOCAL_CONTEXT_CEILING)
-                        Log.i("OcLocalLlamaProvider", "Loading model at ${model.path} (ctx=$ctx, nGpu=$nGpu, threads=$nThreads, vulkan=$vulkan)")
-                        val result = bridge.loadModelWithFallback(model.path, ctx, nGpu, nThreads, vulkan)
+                        Log.i(
+                            "OcLocalLlamaProvider",
+                            "Loading model at ${model.path} (ctx=$ctx, requestedGpuLayers=" +
+                                "${if (nGpu < 0) "all" else nGpu}, " +
+                                "modelLayers=${model.layerCount ?: "unknown"}, threads=$nThreads, vulkan=$vulkan)",
+                        )
+                        val result = bridge.loadModelWithFallback(
+                            model.path, ctx, nGpu, nThreads, vulkan, model.layerCount ?: 0,
+                        )
                         activeBridge = bridge
-                        Log.i("OcLocalLlamaProvider", "Model loaded: handle=${result.handle}, backend=${result.backend}, gpuLayers=${result.nGpuLayersUsed}")
+                        // The layers llama.cpp actually placed on the GPU are
+                        // logged by the runtime itself ("offloaded N/M layers to
+                        // GPU"). Repeating the request here as if it were the
+                        // outcome is how a CPU-only load looked like a GPU one.
+                        Log.i(
+                            "OcLocalLlamaProvider",
+                            "Model loaded: handle=${result.handle}, backend=${result.backend}, " +
+                                "requestedGpuLayers=${result.requestedGpuLayers}",
+                        )
                         result.handle
                     } else {
                         if (!com.aide.mobilestudio.ai.api.LlamaAndroid.isNativeAvailable()) {
@@ -931,7 +948,13 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
         }
         trySend(AIProvider.StreamEvent.Done)
         close()
-        awaitClose { }
+        // Free the native session the moment this request's stream ends. The
+        // engine builds a fresh provider per call, and nothing else ever called
+        // unload(), so every request left a loaded model - over a gigabyte of
+        // native memory - behind: the app's memory only ever grew while the
+        // user chatted. The model is reloaded on the next call, which is what
+        // already happened anyway.
+        awaitClose { unload() }
     }
 
     private fun buildPrompt(history: JSONArray, tools: JSONArray?): String {

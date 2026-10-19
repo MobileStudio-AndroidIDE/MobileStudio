@@ -53,6 +53,12 @@ class BashTool : OcTool {
                 "description",
                 "Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS} and may not exceed ${MAX_TIMEOUT_MS}.",
             ))
+            put("maxLines", JSONObject().put("type", "integer").put(
+                "description",
+                "Output lines to return. Defaults to $DEFAULT_OUTPUT_LINES. When the command printed more, " +
+                    "the middle is omitted (first and last lines are kept) - ask for a higher value, up to " +
+                    "the configured maximum, when you need the whole log.",
+            ))
         })
         put("required", JSONArray().put("command"))
     }
@@ -86,18 +92,39 @@ class BashTool : OcTool {
             outputLines.add(line)
         }
         val joined = outputLines.joinToString("\n")
-        val maxLines = ctx.config.maxToolOutputLines()
+        // 50 lines by default, not the 2000 the config allows: a build log that
+        // long used to be handed to the model and the UI whole, which is what
+        // made a single command freeze the workspace. The model can ask for
+        // more; the config value stays the ceiling.
+        val maxLines = args.optInt("maxLines", DEFAULT_OUTPUT_LINES)
+            .coerceIn(1, ctx.config.maxToolOutputLines())
         val maxBytes = ctx.config.maxToolOutputBytes()
         var truncated = false
-        var output = joined
+        var output: String
         if (outputLines.size > maxLines) {
-            output = outputLines.take(maxLines).joinToString("\n")
+            // Head and tail: the opening lines say what ran, the closing lines
+            // carry the error. Keeping only the head hid the interesting half
+            // of every long build.
+            val head = maxLines / 2
+            val tail = maxLines - head
+            val omitted = outputLines.size - maxLines
+            output = (
+                outputLines.take(head) +
+                    "… ($omitted lines omitted - rerun with maxLines=$maxLines or higher to see more) …" +
+                    outputLines.takeLast(tail)
+                ).joinToString("\n")
             truncated = true
+        } else {
+            output = joined
         }
         if (output.toByteArray().size > maxBytes) {
             output = String(output.toByteArray(), 0, maxBytes, Charsets.UTF_8)
+                // A multi-byte character cut in half decodes to U+FFFD; drop it
+                // rather than leave a replacement mark in the middle of a word.
+                .trimEnd('\uFFFD')
             truncated = true
         }
+        if (output.isBlank()) output = "(no output)"
         if (truncated) output += "\n\n(Output truncated. Full output was ${joined.length} characters.)"
         val exit = result?.exitCode ?: -1
         if (result?.timedOut == true) {
@@ -109,6 +136,9 @@ class BashTool : OcTool {
     companion object {
         const val DEFAULT_TIMEOUT_MS = 2L * 60 * 1_000
         const val MAX_TIMEOUT_MS = 10L * 60 * 1_000
+
+        /** Lines returned when the model does not ask for a specific count. */
+        const val DEFAULT_OUTPUT_LINES = 50
     }
 }
 

@@ -86,7 +86,7 @@ class LocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvider
                         }
                         activeBridge = bridge
                         modelHandle = result.handle
-                        Log.i("LocalLlamaProvider", "Model loaded: handle=${result.handle}, backend=${result.backend}, gpuLayers=${result.nGpuLayersUsed}")
+                        Log.i("LocalLlamaProvider", "Model loaded: handle=${result.handle}, backend=${result.backend}, requestedGpuLayers=${result.requestedGpuLayers}")
                     } catch (e: Exception) {
                         Log.e("LocalLlamaProvider", "Model load failed (GPU offload fallback exhausted): ${e.message}", e)
                         modelHandle = 0L

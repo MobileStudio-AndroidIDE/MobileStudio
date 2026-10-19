@@ -31,6 +31,16 @@ class ModelManager(private val context: Context) {
          * model got loaded at a size it was never trained for.
          */
         val maxContext: Int? = null,
+
+        /**
+         * Layers the model declares in its GGUF header (block_count).
+         *
+         * Null when the file does not declare one or has not been downloaded.
+         * Used to report an honest offload request ("all 29 layers") and to
+         * step the GPU fallback down in usable increments instead of blind
+         * decrements - neither is a guess.
+         */
+        val layerCount: Int? = null,
     )
 
     /**
@@ -134,12 +144,18 @@ class ModelManager(private val context: Context) {
                 obj.optString("quantization", "Q4_K_M"),
                 obj.optInt("contextLength", 4096),
                 ggufInfo(obj.getString("path"))?.contextLength,
+                ggufInfo(obj.getString("path"))?.nLayer,
             ))
         }
         val remote = listRemoteModels()
         remote.forEach { r ->
             if (isModelDownloaded(r) && list.none { it.id == r.id }) {
-                list.add(r.copy(maxContext = ggufInfo(r.path)?.contextLength))
+                list.add(
+                    r.copy(
+                        maxContext = ggufInfo(r.path)?.contextLength,
+                        layerCount = ggufInfo(r.path)?.nLayer,
+                    ),
+                )
             }
         }
         return list
@@ -150,7 +166,13 @@ class ModelManager(private val context: Context) {
         val models = listModels().toMutableList()
         if (models.any { it.id == id }) return
         
-        models.add(ModelInfo(id, name, path, maxContext = ggufInfo(path)?.contextLength))
+        models.add(
+            ModelInfo(
+                id, name, path,
+                maxContext = ggufInfo(path)?.contextLength,
+                layerCount = ggufInfo(path)?.nLayer,
+            ),
+        )
         saveModels(models)
     }
 

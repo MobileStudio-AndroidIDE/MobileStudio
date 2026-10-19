@@ -46,7 +46,15 @@ class LlamaRuntimeBridge {
 
     data class LoadResult(
         val handle: Long,
-        val nGpuLayersUsed: Int,
+        /**
+         * Layers the loader was asked to place on the GPU.
+         *
+         * Deliberately not called "used": llama.cpp clamps this to the model's
+         * own layer count and logs what it actually offloaded
+         * ("offloaded N/M layers to GPU"). Reporting the request as the outcome
+         * is how a CPU-only load was mistaken for a GPU one.
+         */
+        val requestedGpuLayers: Int,
         val backend: String
     )
 
@@ -100,12 +108,27 @@ class LlamaRuntimeBridge {
     ): LoadResult {
         unload()
 
-        // Vulkan unavailable → CPU only (honest configuration)
-        var nGpu = if (vulkanAvailable && requestedGpuLayers != 0) {
-            if (maxLayers in 1..Int.MAX_VALUE) {
-                if (requestedGpuLayers < 0) maxLayers else requestedGpuLayers.coerceAtMost(maxLayers)
-            } else requestedGpuLayers
-        } else 0
+        // Vulkan unavailable, or the caller asked for CPU: load on the CPU and
+        // say so, instead of reporting an offload that never happened.
+        val resolved = when {
+            !vulkanAvailable -> 0
+            requestedGpuLayers == 0 -> 0
+            // Negative means "every layer" (llama.h). Resolve it to the model's
+            // own layer count when that is known so the fallback ladder below
+            // steps down in real fractions instead of blind decrements; when the
+            // count is unknown the negative value is passed through and llama.cpp
+            // still resolves it to all layers.
+            requestedGpuLayers < 0 -> if (maxLayers > 0) maxLayers else requestedGpuLayers
+            maxLayers > 0 -> requestedGpuLayers.coerceAtMost(maxLayers)
+            else -> requestedGpuLayers
+        }
+        when {
+            !vulkanAvailable -> Log.i(TAG, "Vulkan backend unavailable: loading CPU only")
+            resolved < 0 -> Log.i(TAG, "Requested all layers (model layer count unknown to the app)")
+            maxLayers > 0 -> Log.i(TAG, "Requested $resolved of the model's $maxLayers layers on the GPU")
+            resolved == 0 -> Log.i(TAG, "Requested CPU only (n_gpu_layers=0)")
+        }
+        var nGpu = resolved
 
         var attempt = 0
         while (true) {
@@ -124,15 +147,26 @@ class LlamaRuntimeBridge {
                 backendUsed = if (nGpu == 0) "CPU" else "Vulkan"
                 return LoadResult(h, nGpu, backendUsed)
             }
-            // Fallback: lower the offload level — never retry forever
-            if (nGpu == 0 || attempt >= MAX_FALLBACK_RETRIES) {
+            if (nGpu == 0) {
+                // CPU was the last rung of the ladder; nothing is left to lower.
                 val err = nativeLastError() ?: "unknown"
-                Log.e(TAG, "Model load failed after $attempt attempts: $err")
+                Log.e(TAG, "Model load failed on CPU too, after $attempt attempts: $err")
                 throw RuntimeException("Model load failed: $err")
             }
-            val step = if (maxLayers > 8) maxLayers / 4 else 2
-            nGpu = if (nGpu < 0) 0 else (nGpu - step).coerceAtLeast(0)
-            Log.w(TAG, "Retrying with n_gpu_layers=$nGpu")
+            // Lower the offload and, once the retries are spent, fall back to
+            // the CPU: the ladder exists to keep the app alive on a device that
+            // cannot hold the model, not to retry forever. The failure text is
+            // kept for the report - an out-of-memory load and a corrupt file
+            // must not read the same.
+            val err = nativeLastError() ?: "unknown"
+            nGpu = if (attempt >= MAX_FALLBACK_RETRIES) {
+                0
+            } else if (maxLayers > 8) {
+                (nGpu - maxLayers / 4).coerceAtLeast(0)
+            } else {
+                (nGpu - 2).coerceAtLeast(0)
+            }
+            Log.w(TAG, "Load attempt #$attempt failed ($err); retrying with n_gpu_layers=$nGpu")
         }
     }
 

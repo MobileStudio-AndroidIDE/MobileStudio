@@ -54,6 +54,7 @@ private const val SMALL_CONTEXT_LIMIT = 8_192
  */
 private val SMALL_CONTEXT_TOOL_ORDER = listOf(
     "read", "edit", "write", "bash", "grep", "glob", "patch",
+    "gradle_build", "project_diagnostics", "llama_model_info", "device_info", "llama_runtime_logs", "android_logcat",
     "todowrite", "question", "skill", "websearch", "webfetch", "task",
 )
 
@@ -126,8 +127,8 @@ class OcEngine(private val context: Context) : EngineBridge {
     var agentName: String = agentRegistry.defaultAgent()
     var listener: Listener? = null
     val runtimeOptions = JSONObject().apply {
-        put("nGpuLayers", 32)
-        put("nThreads", 4)
+        put("nGpuLayers", settings.nGpuLayers)
+        put("nThreads", settings.nThreads)
     }
 
     private var currentSession: OcSessionStore.Session? = null
@@ -242,6 +243,14 @@ class OcEngine(private val context: Context) : EngineBridge {
                 GlobTool(),
                 GrepTool(),
                 PatchTool(),
+                // The work this app exists for: building on the device and
+                // reading what the build and the local runtime actually did.
+                GradleBuildTool(),
+                ProjectDiagnosticsTool(),
+                LlamaModelInfoTool(),
+                DeviceInfoTool(),
+                LlamaRuntimeLogsTool(),
+                AndroidLogcatTool(),
                 TodoWriteTool(),
                 TaskTool(),
                 QuestionTool(),
