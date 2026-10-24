@@ -463,40 +463,289 @@ private fun Context.buildLandscapeMainSurface(): View {
 
 /**
  * 전화기 가로모드 전용 UI.
- * 세로모드와 동일하게 사이드 레일(좌측) + 콘텐츠(우측)로 구성하지만,
- * 가로 폭을 모두 활용해 세로모드보다 넓게 편집 영역이 쓰이게 한다.
+ * 세로모드 컴포넌트(buildChrome, buildTabStrip, buildWorkspaceArea, buildStatusBar)를
+ * 전혀 재사용하지 않고, 가로모드에 특화된 새로운 레이아웃으로 구성한다.
+ *
+ * 전화기 가로모드는 폭은 넓고(~720dp) 높이는 좁다(~360dp).
+ * 따라서 위아래 여백을 최소화하고 좌우 폭을 최대한 활용한다:
+ *
+ *   [ 상단 툴바: 메뉴 | 프로젝트 | 실행 | 동기화 | 탭들 ]
+ *   [ 사이드 레일 | 에디터 영역 (가장 넓음) ]
+ *   [ 하단 출력판: 빌드 로그 / 터미널 (컴팩트) ]
+ *   [ 상태바: 준비 / 언어 / 인코딩 등 ]
+ *
+ * 모든 영역이 가로모드 전용 컴포넌트이며, 세로모드와는 별도로 설계됐다.
  */
 private fun Context.buildPhoneLandscapeMainSurface(): View {
     val ctx = this
     return FrameLayout(ctx).apply {
         val root = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
-            // 좌측: 사이드 레일 (고정 폭)
-            addView(ctx.buildSideRail())
+            // 1) 상단 툴바: 가로 폭을 살려 버튼들을 한 줄에 배열
+            addView(buildPhoneLandscapeTopBar(ctx))
 
             // 구분선
             addView(View(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
                 setBackgroundColor(StudioUi.color("#3E4451"))
             })
 
-            // 우측: 에디터 콘텐츠 (가변 폭, 나머지 전체 사용)
-            val content = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-                background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
-                addView(ctx.buildChrome())
-                addView(ctx.buildProjectTabStrip())
-                addView(ctx.buildTabStrip())
-                addView(ctx.buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-                addView(ctx.buildStatusBar())
+            // 2) 메인 영역: 사이드 레일 + 에디터 (가로 분할)
+            val main = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+
+                // 좌측 사이드 레일 (고정 폭, 세로모드와 동일 아이콘)
+                addView(ctx.buildSideRail())
+
+                // 구분선
+                addView(View(ctx).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT)
+                    setBackgroundColor(StudioUi.color("#3E4451"))
+                })
+
+                // 우측 에디터 영역 (나머지 전체)
+                addView(ctx.buildPhoneLandscapeEditor(ctx))
             }
-            addView(content)
+            addView(main)
+
+            // 구분선
+            addView(View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
+                setBackgroundColor(StudioUi.color("#3E4451"))
+            })
+
+            // 3) 하단 출력판: 빌드 로그 / 터미널 (가로모드에서는 좌우 폭을 활용해 컴팩트하게)
+            addView(ctx.buildPhoneLandscapeBottomPanel(ctx))
+
+            // 4) 상태바: 가로폭 전체를 활용해 항목들을 한 줄에 배치
+            addView(ctx.buildPhoneLandscapeStatusBar(ctx))
         }
         addView(root)
+    }
+}
+
+/** 전화기 가로모드 전용 상단 툴바. 세로모드 buildChrome과 완전히 별도. */
+private fun Context.buildPhoneLandscapeTopBar(ctx: Context): View {
+    return LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(6), 0, dp(6), 0)
+        setBackgroundColor(c(StudioUi.LayerToolbar))
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46))
+
+        // 메뉴 햄버거
+        addView(iconButton(R.id.btn_menu, android.R.drawable.ic_menu_sort_by_size, StudioUi.TextSoft, "Menu", 34))
+
+        // 프로젝트 스위처 (드롭다운 화살표)
+        addView(TextView(ctx).apply {
+            text = "MobileStudio"
+            textSize = StudioUi.TypeSmall
+            setTextColor(c(StudioUi.Text))
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(8), 0)
+            setCompoundDrawablesWithIntrinsicBounds(0, 0, android.R.drawable.arrow_down_float, 0)
+            compoundDrawablePadding = dp(3)
+            setOnClickListener { (ctx as? MainActivity)?.openMainMenuFromToolbar() }
+            StudioUi.touchLift(this)
+            StudioUi.enforceMinTouchTarget(this)
+        }, LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 구분선
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(24))
+            setBackgroundColor(StudioUi.color("#3E4451"))
+        }, LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 작업 영역 탭들 (프로젝트 / 실행 / 디버그 / 배포 / AI) - 가로 폭을 살려 한 줄에 표시
+        addView(landTab(ctx, "프로젝트", "Project", selected = true))
+        addView(landTab(ctx, "실행", "Run"))
+        addView(landTab(ctx, "디버그", "Debug"))
+        addView(landTab(ctx, "배포", "Deploy"))
+        addView(landTab(ctx, "AI", "AI"))
+
+        addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+
+        // 우측: 빌드 / 동기화 / 뒤로 / 앞으로
+        addView(iconButton(0, android.R.drawable.ic_menu_rotate, StudioUi.TextSoft, "Sync", 30))
+        addView(iconButton(0, android.R.drawable.ic_media_play, StudioUi.ActiveGreen, "Build", 34))
+        addView(iconButton(0, android.R.drawable.ic_menu_revert, StudioUi.TextSoft, "Back", 30))
+        addView(iconButton(0, android.R.drawable.ic_media_ff, StudioUi.TextSoft, "Forward", 30))
+    }
+}
+
+/** 전화기 가로모드 전용 탭 버튼. */
+private fun Context.landTab(ctx: Context, label: String, labelEn: String, selected: Boolean = false): TextView {
+    return TextView(ctx).apply {
+        text = AppLanguage.literal(ctx, label)
+        textSize = 11f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(if (selected) c(StudioUi.ActiveBlue) else c(StudioUi.TextSoft))
+        gravity = Gravity.CENTER
+        setPadding(dp(6), 0, dp(6), 0)
+        setBackgroundColor(if (selected) StudioUi.color("#2E4A66") else StudioUi.color("#00000000"))
+        isClickable = true
+        StudioUi.touchLift(this)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    }
+}
+
+/** 전화기 가로모드 전용 에디터 영역. 세로모드 buildWorkspaceArea와 완전히 별도. */
+private fun Context.buildPhoneLandscapeEditor(ctx: Context): View {
+    return LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(c(StudioUi.Ink))
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+
+        // 배너 (프로젝트 환영 화면 등)
+        addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60))
+        })
+
+        // 에디터 컨테이너 (실제 코드 편집 영역, 대부분 차지)
+        addView(ctx.buildEditorContainer(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+}
+
+/** 전화기 가로모드 전용 하단 출력판. 빌드 로그 / 터미널 등을 좌우 폭으로 표시. */
+private fun Context.buildPhoneLandscapeBottomPanel(ctx: Context): View {
+    return LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        background = StudioUi.gradient(ctx, "#0E1524", "#0A0F15")
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(90))
+
+        // 출력판 헤더
+        addView(TextView(ctx).apply {
+            text = "출력"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(c(StudioUi.TextSoft))
+            setPadding(dp(8), dp(4), dp(8), dp(2))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        })
+
+        // 출력 콘텐츠 영역 (빌드 로그, 터미널 등)
+        addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(c(StudioUi.Ink))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        })
+    }
+}
+
+/** 전화기 가로모드 전용 상태바. 세로모드 buildStatusBar와 완전히 별도. */
+private fun Context.buildPhoneLandscapeStatusBar(ctx: Context): View {
+    return LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(8), 0, dp(8), 0)
+        setBackgroundColor(c(StudioUi.LayerStatusBar))
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(26))
+
+        // 배지: 경고 / 오류
+        addView(TextView(ctx).apply {
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveAmber))
+            visibility = View.GONE
+            setPadding(dp(4), 0, dp(6), 0)
+        })
+        addView(TextView(ctx).apply {
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveRed))
+            visibility = View.GONE
+            setPadding(dp(4), 0, dp(6), 0)
+        })
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(14))
+            setBackgroundColor(c(StudioUi.Divider))
+        })
+
+        // 상태 메시지 (왼쪽, 가변 폭)
+        addView(TextView(ctx).apply {
+            text = "Ready"
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.ActiveGreen))
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+
+        // 구분선 + 언어
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(14))
+            setBackgroundColor(c(StudioUi.Divider))
+        })
+        addView(TextView(ctx).apply {
+            text = "Kotlin"
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.TextSoft))
+            setPadding(dp(4), 0, dp(6), 0)
+        })
+
+        // 구분선 + 인코딩
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(14))
+            setBackgroundColor(c(StudioUi.Divider))
+        })
+        addView(TextView(ctx).apply {
+            text = "UTF-8"
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.TextSoft))
+            setPadding(dp(4), 0, dp(6), 0)
+        })
+
+        // 구분선 + 커서 위치
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(14))
+            setBackgroundColor(c(StudioUi.Divider))
+        })
+        addView(TextView(ctx).apply {
+            text = "Ln 1, Col 1"
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.TextSoft))
+            setPadding(dp(4), 0, dp(6), 0)
+            isClickable = true
+            setOnClickListener { (ctx as? MainActivity)?.showGoToLineDialog() }
+            StudioUi.touchLift(this)
+        })
+
+        // 구분선 + 그래들
+        addView(View(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(14))
+            setBackgroundColor(c(StudioUi.Divider))
+        })
+        addView(TextView(ctx).apply {
+            text = ""
+            textSize = StudioUi.TypeCaption
+            typeface = Typeface.MONOSPACE
+            setTextColor(c(StudioUi.TextSoft))
+            setPadding(dp(4), 0, dp(6), 0)
+        })
+
+        addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+
+        // 메모리 표시 (우측)
+        addView(TextView(ctx).apply {
+            text = ""
+            textSize = 9f
+            setTextColor(c(StudioUi.InactiveText))
+            setPadding(dp(6), 0, dp(4), 0)
+        })
     }
 }
 
