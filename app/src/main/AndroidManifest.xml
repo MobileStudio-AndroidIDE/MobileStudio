@@ -227,6 +227,14 @@
             android:theme="@style/GodotEditorSplashScreenTheme" />
 
         <activity
+            android:name="org.godotengine.editor.GodotEditor"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
+            android:theme="@style/GodotEditorSplashScreenTheme" />
+
+        <activity
             android:name="org.godotengine.editor.GodotGame"
             android:exported="false"
             android:launchMode="singleTask"
