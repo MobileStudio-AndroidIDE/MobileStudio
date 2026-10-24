@@ -176,7 +176,7 @@ class MobileGodotEditorActivity : GodotEditor() {
         if (!result) Toast.makeText(this, failure, Toast.LENGTH_SHORT).show()
     }
 
-    /** Godot 게임을 직접 실행: 에디터의 Java 메서드에 의존하지 않고 GodotGame 액티비티를 시작 */
+    /** Godot 게임을 직접 실행: GodotGame 액티비티를 시작해 현재 프로젝트를 구동 */
     private fun runGodotGame() {
         val args = intent.getStringArrayExtra(GodotActivity.EXTRA_COMMAND_LINE_PARAMS) ?: emptyArray()
         val pathIndex = args.indexOf("--path")
@@ -185,10 +185,21 @@ class MobileGodotEditorActivity : GodotEditor() {
             Toast.makeText(this, "프로젝트 경로를 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
+        val projectFile = File(projectPath)
+        if (!projectFile.exists()) {
+            Toast.makeText(this, "프로젝트 폴더가 존재하지 않습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         val intent = Intent(this, Class.forName("org.godotengine.editor.GodotGame") as Class<out android.app.Activity>).apply {
+            // Godot가 프로젝트 경로를 읽기 위해 여러 키로 시도
             putExtra("godot.project.path", projectPath)
-            putExtra("godot.project.name", File(projectPath).name)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("godot.project.name", projectFile.name)
+            putExtra("project", projectPath)
+            putExtra("project_path", projectPath)
+            // Godot 명령줄 인자 형태로도 전달
+            putExtra("godot.cmdline", arrayOf("--path", projectPath))
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
         try {
             startActivity(intent)
