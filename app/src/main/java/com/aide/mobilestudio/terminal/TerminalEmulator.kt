@@ -705,7 +705,7 @@ class TerminalEmulator(
     }
 
     fun getLine(row: Int): List<Cell> {
-        return if (row in 0 until rows) lines[row] else newRow()
+        return if (row in 0 until lines.size) lines[row] else newRow()
     }
 
     fun getScrollBackLine(index: Int): List<Cell> {
