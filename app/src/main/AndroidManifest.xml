@@ -11,8 +11,11 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>
+        <package android:name="org.godotengine.godot_gradle_build_environment" />
         <intent>
             <action android:name="android.intent.action.INSTALL_PACKAGE" />
             <data android:mimeType="application/vnd.android.package-archive" />
@@ -213,6 +216,49 @@
             android:exported="false"
             android:screenOrientation="unspecified"
             android:configChanges="orientation|screenSize" />
+
+        <activity
+            android:name="com.aide.mobilestudio.godot.MobileGodotEditorActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
+            android:theme="@style/GodotEditorSplashScreenTheme" />
+
+        <activity
+            android:name="org.godotengine.editor.GodotGame"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":GodotGame"
+            android:taskAffinity=":game"
+            android:autoRemoveFromRecents="true"
+            android:supportsPictureInPicture="true"
+            android:screenOrientation="userLandscape"
+            android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
+            android:theme="@style/GodotGameTheme" />
+
+        <activity
+            android:name="org.godotengine.editor.embed.EmbeddedGodotGame"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":EmbeddedGodotGame"
+            android:taskAffinity=":embed"
+            android:excludeFromRecents="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
+            android:theme="@style/GodotEmbeddedGameTheme" />
+
+        <activity
+            android:name="org.godotengine.editor.GodotXRGame"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":GodotXRGame"
+            android:taskAffinity=":xr"
+            android:autoRemoveFromRecents="true"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:configChanges="layoutDirection|locale|orientation|keyboardHidden|screenSize|smallestScreenSize|density|keyboard|navigation|screenLayout|uiMode"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
 
 
         <service

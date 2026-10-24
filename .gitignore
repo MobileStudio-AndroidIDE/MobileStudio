@@ -62,3 +62,8 @@ debug.keystore
 /ShellAapt*.txt
 /Visitor-*.txt
 local.properties
+
+# Godot native build work dirs
+/godot/.cache/
+/godot/.work/
+/third_party/godot/native/**/*.so

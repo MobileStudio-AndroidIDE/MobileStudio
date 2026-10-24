@@ -229,6 +229,34 @@ object NewProjectDialog {
         windowsSection.addView(tvWindowsNote)
         root.addView(windowsSection)
 
+        val godotSection = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        godotSection.addView(label(if (isKorean) "템플릿" else "Template"))
+        val tvGodotOnly = TextView(context).apply {
+            text = "Godot 4.7.2 (project.godot + main.tscn)"
+            textSize = 14f
+            setTextColor(StudioUi.palette.success)
+            setPadding(24, 14, 24, 14)
+            background = GradientDrawable().apply {
+                setColor(StudioUi.palette.surface2)
+                cornerRadius = 10f
+                setStroke(1, StudioUi.palette.border)
+            }
+        }
+        godotSection.addView(tvGodotOnly)
+        val tvGodotNote = TextView(context).apply {
+            text = if (isKorean)
+                "실행 버튼을 누르면 내장 Godot 에디터가 열립니다."
+            else "Press Run to open the built-in Godot editor."
+            textSize = 11f
+            setTextColor(StudioUi.palette.muted)
+            setPadding(24, 4, 24, 8)
+        }
+        godotSection.addView(tvGodotNote)
+        root.addView(godotSection)
+
         val radioGroup = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -239,6 +267,7 @@ object NewProjectDialog {
             androidSection.visibility = if (t == 0) View.VISIBLE else View.GONE
             pythonSection.visibility = if (t == 1) View.VISIBLE else View.GONE
             windowsSection.visibility = if (t == 2) View.VISIBLE else View.GONE
+            godotSection.visibility = if (t == 3) View.VISIBLE else View.GONE
             etPackage.visibility = if (t == 0) View.VISIBLE else View.GONE
             for (i in 0 until root.childCount) {
                 val child = root.getChildAt(i)
@@ -269,6 +298,13 @@ object NewProjectDialog {
             setOnClickListener { applyType(2) }
         }
         radioGroup.addView(rbWindows)
+        val rbGodot = RadioButton(context).apply {
+            text = "Godot"
+            setTextColor(StudioUi.palette.text)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { applyType(3) }
+        }
+        radioGroup.addView(rbGodot)
         root.addView(radioGroup)
 
         val tvError = TextView(context).apply {
@@ -356,7 +392,8 @@ object NewProjectDialog {
                     }
                 }
                 1 -> ProjectTemplateGenerator.Template.PYTHON_SCRIPT
-                else -> ProjectTemplateGenerator.Template.WINDOWS_EXE
+                2 -> ProjectTemplateGenerator.Template.WINDOWS_EXE
+                else -> ProjectTemplateGenerator.Template.GODOT_PROJECT
             }
 
                 val toolchain = ToolchainManager(context)
@@ -373,7 +410,8 @@ object NewProjectDialog {
                     packageName    = when (selectedType) {
                     0 -> pkgName
                     1 -> "python.$appName"
-                    else -> "win.$appName"
+                    2 -> "win.$appName"
+                    else -> "godot.$appName"
                 },
                     minSdk         = if (selectedType == 0) minSdkValues[spinnerMinSdk.selectedItemPosition] else 21,
                     template       = template,

@@ -34,6 +34,10 @@ class BootstrapSdkInstaller(
                 installSdkPackage(repositoryXml, "platform-tools")
                 installSdkPackage(repositoryXml, "platforms;android-34")
                 installSdkPackage(repositoryXml, "build-tools;34.0.0")
+                listOf("platforms;android-36", "build-tools;36.1.0").forEach { packagePath ->
+                    runCatching { installSdkPackage(repositoryXml, packagePath) }
+                        .onFailure { log("optional $packagePath install failed: ${it.message}") }
+                }
                 writeAndroidSdkLicenses()
                 toolchain.setActiveVersion(ToolchainManager.Kind.SDK, "android-34")
                 runCatching { toolchain.ensureAssetOverridesInstalled() }
@@ -70,16 +74,18 @@ class BootstrapSdkInstaller(
                         ?: error("platform-tools archive layout not recognized")
                     replaceDirectory(source, File(sdkDir, "platform-tools"))
                 }
-                "platforms;android-34" -> {
+                "platforms;android-34", "platforms;android-36" -> {
+                    val version = packagePath.substringAfter(';')
                     val androidJar = temp.walkTopDown().firstOrNull { it.isFile && it.name == "android.jar" }
-                        ?: error("android-34 platform archive does not contain android.jar")
-                    replaceDirectory(androidJar.parentFile!!, File(sdkDir, "platforms/android-34"))
+                        ?: error("$version platform archive does not contain android.jar")
+                    replaceDirectory(androidJar.parentFile!!, File(sdkDir, "platforms/$version"))
                 }
-                "build-tools;34.0.0" -> {
+                "build-tools;34.0.0", "build-tools;36.1.0" -> {
+                    val version = packagePath.substringAfter(';')
                     val aapt2 = temp.walkTopDown().firstOrNull { it.isFile && it.name == "aapt2" }
                         ?: error("build-tools archive does not contain aapt2")
-                    replaceDirectory(aapt2.parentFile!!, File(sdkDir, "build-tools/34.0.0"))
-                    File(sdkDir, "build-tools/34.0.0").walkTopDown()
+                    replaceDirectory(aapt2.parentFile!!, File(sdkDir, "build-tools/$version"))
+                    File(sdkDir, "build-tools/$version").walkTopDown()
                         .filter { it.isFile }
                         .forEach {
                             it.setReadable(true, false)
@@ -99,6 +105,8 @@ class BootstrapSdkInstaller(
             "platform-tools" -> File(sdkDir, "platform-tools/adb").exists()
             "platforms;android-34" -> File(sdkDir, "platforms/android-34/android.jar").exists()
             "build-tools;34.0.0" -> File(sdkDir, "build-tools/34.0.0/aapt2").exists()
+            "platforms;android-36" -> File(sdkDir, "platforms/android-36/android.jar").exists()
+            "build-tools;36.1.0" -> File(sdkDir, "build-tools/36.1.0/aapt2").exists()
             else -> false
         }
     }
@@ -111,6 +119,10 @@ class BootstrapSdkInstaller(
             "platforms;android-34" -> blocks.firstOrNull {
                 "obsolete=\"true\"" !in it &&
                     Regex("<display-name>Android SDK Platform 34</display-name>").containsMatchIn(it)
+            } ?: blocks.firstOrNull()
+            "platforms;android-36" -> blocks.firstOrNull {
+                "obsolete=\"true\"" !in it &&
+                    Regex("<display-name>Android SDK Platform 36</display-name>").containsMatchIn(it)
             } ?: blocks.firstOrNull()
             else -> blocks.firstOrNull { "obsolete=\"true\"" !in it } ?: blocks.firstOrNull()
         } ?: error("SDK package not found: $packagePath")

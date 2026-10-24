@@ -169,7 +169,8 @@ class MainActivity : AppCompatActivity(), ContextMenuUtils.FileContextMenuHandle
         JAR,
         EXE,
         GAME,
-        LUA_GAME
+        LUA_GAME,
+        GODOT
     }
 
     private lateinit var autoComplete: KotlinAutoComplete
@@ -6066,6 +6067,10 @@ Long press: Toggle Shell panel"""
             runWindowsExeBuild(dir)
             return
         }
+        if (currentProjectKind == ProjectKind.GODOT) {
+            openGodotEditor(dir)
+            return
+        }
         // Direct game play for script-based games (lua/js/gdscript) — no APK build needed
         if (runScriptGameDirect(dir)) {
             return
@@ -6313,6 +6318,20 @@ Long press: Toggle Shell panel"""
         ProjectKind.GAME -> "assemble${variantSelector.getCurrentVariant().replaceFirstChar { it.uppercase() }}"
         ProjectKind.ANDROID -> "assemble${variantSelector.getCurrentVariant().replaceFirstChar { it.uppercase() }}"
         ProjectKind.LUA_GAME -> "run"
+        ProjectKind.GODOT -> "run"
+    }
+
+    private fun openGodotEditor(projectDir: File) {
+        if (!com.aide.mobilestudio.godot.GodotMobileBridge.isNativeLibraryAvailable(this)) {
+            showToast("Godot native library is missing. Run godot/fetch-prebuilt-libs.sh or godot/build-godot-android.sh.")
+            return
+        }
+        saveAllFiles()
+        val args = arrayOf("--editor", "--path", projectDir.absolutePath)
+        val intent = Intent(this, com.aide.mobilestudio.godot.MobileGodotEditorActivity::class.java).apply {
+            putExtra(org.godotengine.godot.GodotActivity.EXTRA_COMMAND_LINE_PARAMS, args)
+        }
+        startActivity(intent)
     }
 
     /**
@@ -7306,11 +7325,11 @@ Long press: Toggle Shell panel"""
         loadFileTree(targetDir)
         drawerLayout.closeDrawer(GravityCompat.START)
         autoComplete.setProjectDir(targetDir)
-        gradleSyncNeeded = true
+        gradleSyncNeeded = currentProjectKind != ProjectKind.GODOT
         checkProjectUpdates()
 
-        tvStatusRight.text = "Sync Now"
-        tvStatusRight.setTextColor(Color.parseColor("#E5C07B"))
+        tvStatusRight.text = if (currentProjectKind == ProjectKind.GODOT) "Godot" else "Sync Now"
+        tvStatusRight.setTextColor(Color.parseColor(if (currentProjectKind == ProjectKind.GODOT) "#61AFEF" else "#E5C07B"))
 
         // Live edit: watch project files.
         fileWatcher?.stop()
@@ -7318,14 +7337,18 @@ Long press: Toggle Shell panel"""
             if (changedFiles.any { isGradleSyncFile(it) }) {
                 runOnUiThread { markGradleSyncNeeded(changedFiles.firstOrNull { isGradleSyncFile(it) }) }
             }
-            if (currentProjectKind == ProjectKind.PYTHON) {
-                schedulePythonDiagnostics(changedFiles)
-            } else {
-                buildScheduler.schedule(changedFiles)
+            if (currentProjectKind != ProjectKind.GODOT) {
+                if (currentProjectKind == ProjectKind.PYTHON) {
+                    schedulePythonDiagnostics(changedFiles)
+                } else {
+                    buildScheduler.schedule(changedFiles)
+                }
             }
         }.also { it.start() }
-        buildScheduler.attachTo(fileWatcher!!, targetDir)
-        scheduleInitialProjectDiagnostics(targetDir)
+        if (currentProjectKind != ProjectKind.GODOT) {
+            buildScheduler.attachTo(fileWatcher!!, targetDir)
+            scheduleInitialProjectDiagnostics(targetDir)
+        }
 
         // Start real-time analysis engine (standalone Kotlin/Java compiler)
         analysisEngine?.stopAll()
@@ -7451,6 +7474,7 @@ Long press: Toggle Shell panel"""
     }
 
     private fun detectProjectKind(root: File): ProjectKind {
+        if (File(root, "project.godot").isFile) return ProjectKind.GODOT
 val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile ||
             File(root, "src/main/AndroidManifest.xml").isFile
         val hasAndroidBuild = File(root, "settings.gradle").isFile &&
@@ -7503,15 +7527,17 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
     private fun updateProjectModeUi() {
         val isPython = currentProjectKind == ProjectKind.PYTHON
         val isJar = currentProjectKind == ProjectKind.JAR
+        val isGodot = currentProjectKind == ProjectKind.GODOT
         (findViewById<View>(R.id.tools_btn_run)?.parent as? View)?.visibility = View.VISIBLE
-        findViewById<TextView>(R.id.tools_build_option_label).visibility = if (isPython) View.GONE else View.VISIBLE
-        findViewById<View>(R.id.tools_btn_clean).visibility = if (isPython) View.GONE else View.VISIBLE
-        findViewById<View>(R.id.tools_btn_apk).visibility = if (isPython) View.GONE else View.VISIBLE
+        findViewById<TextView>(R.id.tools_build_option_label).visibility = if (isPython || isGodot) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.tools_btn_clean).visibility = if (isPython || isGodot) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.tools_btn_apk).visibility = if (isPython || isGodot) View.GONE else View.VISIBLE
         findViewById<TextView>(R.id.tab_build).text = when {
             isPython -> ui("Compile")
             currentProjectKind == ProjectKind.EXE -> ui("Build .exe")
             isJar -> ui("Build")
             currentProjectKind == ProjectKind.GAME -> ui("Build APK")
+            isGodot -> ui("Editor")
             else -> ui("Build")
         }
         findViewById<TextView>(R.id.tab_logcat)?.text = if (isPython) ui("Outputs") else ui("Logcat")
@@ -7524,6 +7550,7 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
             ProjectKind.GAME -> "Game"
             ProjectKind.ANDROID -> "Android"
             ProjectKind.LUA_GAME -> "Lua Game"
+            ProjectKind.GODOT -> "Godot"
         }
     }
 
@@ -7533,6 +7560,7 @@ val hasAndroidManifest = File(root, "app/src/main/AndroidManifest.xml").isFile |
     }
 
     private fun scheduleInitialProjectDiagnostics(projectDir: File) {
+        if (currentProjectKind == ProjectKind.GODOT) return
         scope.launch {
             delay(1_200)
             if (currentProjectDir != projectDir || isBuildRunning) return@launch

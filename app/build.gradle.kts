@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "com.aide.mobilestudio"
-    compileSdk = 34
+    compileSdk = 36
+    buildToolsVersion = "36.1.0"
 
     defaultConfig {
         applicationId = "com.aide.mobilestudio"
@@ -17,6 +18,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         multiDexEnabled = true
+        missingDimensionStrategy("products", "editor")
+        manifestPlaceholders["godotLibraryVersion"] = "4.7.2.stable"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -81,8 +84,11 @@ android {
 
     packagingOptions {
         jniLibs {
-
             useLegacyPackaging = true
+            pickFirsts += setOf(
+                "**/libc++_shared.so",
+                "**/libopenxr_loader.so"
+            )
             keepDebugSymbols += setOf(
                 "**/libaapt2_exec.so"
             )
@@ -119,7 +125,12 @@ android {
 }
 
 dependencies {
+    implementation(project(":godot-lib"))
+    implementation(project(":godot-editor"))
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-splashscreen:1.0.1")
+    implementation("androidx.fragment:fragment:1.8.6")
+    implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     // EncryptedSharedPreferences for API keys / OAuth tokens / sessions.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
@@ -146,7 +157,6 @@ dependencies {
     implementation("org.ow2.asm:asm-commons:9.7.1")
     implementation("org.ow2.asm:asm-util:9.7.1")
     implementation(files("libs/d8.jar"))
-    implementation("com.android.tools.build:apksig:8.2.0")
 
     implementation("org.apache.commons:commons-compress:1.27.1")
     // zstd-jni removed — using pure Kotlin ZstdDecompressor instead

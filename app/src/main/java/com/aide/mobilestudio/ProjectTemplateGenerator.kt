@@ -67,6 +67,7 @@ class ProjectTemplateGenerator(private val context: Context) {
         GAME_JAVA_2D,
         GAME_GDSCRIPT,
         GAME_CSHARP_2D,
+        GODOT_PROJECT,
     }
 
     enum class BuildDsl { KTS, GROOVY }
@@ -167,6 +168,10 @@ class ProjectTemplateGenerator(private val context: Context) {
         }
         if (cfg.template == Template.GAME_CSHARP_2D) {
             writeCSharpGameProject(root, cfg)
+            return root
+        }
+        if (cfg.template == Template.GODOT_PROJECT) {
+            writeGodotProject(root, cfg)
             return root
         }
         writeRootFiles(root, cfg)
@@ -5129,8 +5134,56 @@ def run():
     pygame.quit()"""
 
     // -----------------------------------------------------------------
-    // GDScript Game Project (Canvas API + custom interpreter)
+    // Godot Project (project.godot + main scene)
     // -----------------------------------------------------------------
+
+    private fun writeGodotProject(root: File, cfg: ProjectConfig) {
+        val appName = cfg.appName.replace("\\", "").replace("\"", "")
+        File(root, "project.godot").writeText(
+            """
+            config_version=5
+
+            [application]
+
+            config/name="$appName"
+            run/main_scene="res://main.tscn"
+            config/features=PackedStringArray("4.7", "GL Compatibility")
+
+            [rendering]
+
+            renderer/rendering_method="gl_compatibility"
+            renderer/rendering_method.mobile="gl_compatibility"
+            """.trimIndent() + "\n"
+        )
+        File(root, "main.tscn").writeText(
+            """
+            [gd_scene load_steps=2 format=3]
+
+            [ext_resource type="Script" path="res://main.gd" id="1_main"]
+
+            [node name="Main" type="Node2D"]
+            script = ExtResource("1_main")
+            """.trimIndent() + "\n"
+        )
+        File(root, "main.gd").writeText(
+            """
+            extends Node2D
+
+            func _ready() -> void:
+                var label := Label.new()
+                label.text = "Hello from Godot!"
+                label.position = Vector2(80, 80)
+                add_child(label)
+            """.trimIndent() + "\n"
+        )
+        File(root, ".gitignore").writeText(
+            """
+            .godot/
+            *.apk
+            *.aab
+            """.trimIndent() + "\n"
+        )
+    }
 
     private fun writeGdScriptGameProject(root: File, cfg: ProjectConfig) {
         writeGradleWrapper(root)

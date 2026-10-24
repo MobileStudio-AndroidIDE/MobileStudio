@@ -18,3 +18,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "MobileStudio"
 include(":app")
+include(":godot-lib")
+include(":godot-editor")
