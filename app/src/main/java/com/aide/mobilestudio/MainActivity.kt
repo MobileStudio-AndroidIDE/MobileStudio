@@ -1636,6 +1636,7 @@ Long press: Toggle Shell panel"""
         ui("Run") to { showRunMenu() },
         ui("Tools") to { showToolsMenu() },
         ui("IDE") to { showIdeMenu() },
+        ui("CodeBrain (로컬 코딩 AI)") to { com.aide.mobilestudio.codebrain.CodeBrainActivity.start(this) },
         // Extensions sat in the old top text row between Community and IDE.
         // Collapsing that row into this menu dropped it, which left the
         // extension manager reachable only from a crash dialog - the only way
