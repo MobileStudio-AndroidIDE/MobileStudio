@@ -1,5 +1,6 @@
 package com.aide.mobilestudio.godot
 
+import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
@@ -85,7 +86,7 @@ class MobileGodotEditorActivity : GodotEditor() {
             layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
         })
         top.addView(actionButton("Save") { runBridge(GodotMobileBridge.save(), "Save unavailable") })
-        top.addView(actionButton("▶") { runBridge(GodotMobileBridge.playMain(), "Run unavailable") })
+        top.addView(actionButton("▶") { runGodotGame() })
         top.addView(actionButton("■") { runBridge(GodotMobileBridge.stop(), "Stop unavailable") })
         top.addView(actionButton("⛶") { toggleFullscreen() })
 
@@ -173,6 +174,27 @@ class MobileGodotEditorActivity : GodotEditor() {
 
     private fun runBridge(result: Boolean, failure: String) {
         if (!result) Toast.makeText(this, failure, Toast.LENGTH_SHORT).show()
+    }
+
+    /** Godot 게임을 직접 실행: 에디터의 Java 메서드에 의존하지 않고 GodotGame 액티비티를 시작 */
+    private fun runGodotGame() {
+        val args = intent.getStringArrayExtra(GodotActivity.EXTRA_COMMAND_LINE_PARAMS) ?: emptyArray()
+        val pathIndex = args.indexOf("--path")
+        val projectPath = if (pathIndex >= 0 && pathIndex + 1 < args.size) args[pathIndex + 1] else null
+        if (projectPath.isNullOrBlank()) {
+            Toast.makeText(this, "프로젝트 경로를 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(this, Class.forName("org.godotengine.editor.GodotGame") as Class<out android.app.Activity>).apply {
+            putExtra("godot.project.path", projectPath)
+            putExtra("godot.project.name", File(projectPath).name)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "게임 실행 실패: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun actionButton(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
