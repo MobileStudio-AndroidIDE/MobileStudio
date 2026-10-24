@@ -75,6 +75,8 @@
         <activity android:name=".extension.ExtensionManagerActivity" android:exported="false" android:theme="@style/Theme.MobileStudio" />
         <activity android:name=".extension.MyExtensionsActivity" android:exported="false" android:theme="@style/Theme.MobileStudio" />
         <activity android:name=".extension.AdminDashboardActivity" android:exported="false" android:theme="@style/Theme.MobileStudio" />
+        <activity android:name=".codebrain.CodeBrainActivity" android:exported="false" android:theme="@style/Theme.MobileStudio" />
+
         <activity
             android:name=".ToolsActivity"
             android:exported="false"

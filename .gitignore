@@ -18,6 +18,11 @@ app/src/main/assets/extensions/samples/
 examples/line-counter/build/
 
 # IDE state
+
+# Godot build artifacts
+godot-lib/build/
+godot-editor/build/
+app/build/
 /.idea/
 .kotlin/
 .nano/

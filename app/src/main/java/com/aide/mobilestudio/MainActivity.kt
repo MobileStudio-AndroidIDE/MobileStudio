@@ -1663,6 +1663,7 @@ Long press: Toggle Shell panel"""
         ui("Word Wrap") to { toggleWordWrap() },
         ui("Terminal") to { showBottomPanel(); switchToPanel("shell") },
         ui("AI Assistant") to { openAiWorkspace() },
+        ui("CodeBrain (로컬 코딩 AI)") to { com.aide.mobilestudio.codebrain.CodeBrainActivity.start(this) },
         ui("Tools") to { ToolsActivity.start(this) },
         ui("Shell") to { showBottomPanel(); switchToPanel("shell") },
         ui("Logcat") to { showBottomPanel(); switchToPanel("logcat") },
