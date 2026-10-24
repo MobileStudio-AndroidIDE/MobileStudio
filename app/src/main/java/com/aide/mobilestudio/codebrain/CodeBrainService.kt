@@ -48,27 +48,34 @@ class CodeBrainService(private val context: Context) {
         private set
 
     /** 마지막 에러 메시지 */
-    var lastError: String? = null
+    internal var lastError: String? = null
         private set
 
     /**
      * code-brain을 초기화하고 서브프로세스를 시작한다.
      * 앱 최초 실행 시 assets에서 내부 저장소로 추출한다.
+     * Android Python 3.13 (포팅본)을 우선 사용하며, 없으면 안내.
      */
     fun init(callback: (ok: Boolean, error: String?) -> Unit) {
         executor.execute {
             try {
-                // 1) assets에서 내부 저장소로 추출
+                // 1) Android Python 3.13 (포팅본) 확인
+                if (!ensurePython313()) {
+                    mainHandler.post { callback(false, lastError ?: "Python 3.13을 찾을 수 없습니다.") }
+                    return@execute
+                }
+
+                // 2) assets에서 내부 저장소로 추출
                 codeBrainDir = extractCodeBrainFromAssets()
                 if (codeBrainDir == null) {
                     mainHandler.post { callback(false, "code-brain 추출 실패") }
                     return@execute
                 }
 
-                // 2) Python 실행 파일 찾기
+                // 3) Python 실행 파일 찾기
                 val pythonPath = findPython()
                 if (pythonPath == null) {
-                    mainHandler.post { callback(false, "Python을 찾을 수 없습니다. 기기에 Python이 설치되어 있어야 합니다.") }
+                    mainHandler.post { callback(false, "Python 3.13 실행 파일을 찾을 수 없습니다.") }
                     return@execute
                 }
 
@@ -192,18 +199,39 @@ class CodeBrainService(private val context: Context) {
     }
 
     /**
+     * Android Python 3.13 (포팅본)이 기기에 설치되어 있는지 확인한다.
+     * 경로: /data/local/tmp/python-android/bin/python3.13
+     */
+    internal fun ensurePython313(): Boolean {
+        val pythonDir = File("/data/local/tmp/python-android")
+        val pythonBin = File(pythonDir, "bin/python3.13")
+        if (pythonBin.exists()) {
+            Log.d(TAG, "Python 3.13 이미 존재함: $pythonBin")
+            return true
+        }
+        lastError = "Python 3.13이 기기에 설치되어 있지 않습니다.\n" +
+            "다음 경로에 python3.13 바이너리를 설치해 주세요:\n" +
+            "  /data/local/tmp/python-android/bin/python3.13\n" +
+            "pip 인덱스: https://mobilestudio-androidide.github.io/MobileStudio-AndroidPython/simple/"
+        return false
+    }
+
+    /**
      * 기기에서 Python 실행 파일을 찾는다.
+     * Android Python 3.13 (포팅본)을 우선 탐색한다.
      */
     private fun findPython(): String? {
         val candidates = listOf(
+            // 1순위: 이전에 포팅한 Android Python 3.13
+            "/data/local/tmp/python-android/bin/python3.13",
+            "/data/local/tmp/python-android/bin/python3",
+            // 2순위: 시스템 Python
             "python3",
             "python",
             "/system/bin/python3",
             "/system/bin/python",
             "/system/xbin/python3",
             "/system/xbin/python",
-            "/data/local/tmp/python-android/bin/python3.13",
-            "/data/local/tmp/python-android/bin/python3",
         )
         for (c in candidates) {
             try {
@@ -220,6 +248,38 @@ class CodeBrainService(private val context: Context) {
             }
         }
         return null
+    }
+
+    /**
+     * pip으로 패키지를 설치한다.
+     * 예: installPipPackage("numpy") { ok, output -> ... }
+     */
+    fun installPipPackage(packageName: String, callback: (ok: Boolean, output: String) -> Unit) {
+        val pythonPath = findPython() ?: run {
+            callback(false, "Python 3.13을 찾을 수 없습니다.")
+            return
+        }
+        executor.execute {
+            try {
+                val pb = ProcessBuilder(
+                    pythonPath, "-m", "pip", "install",
+                    "--index-url", "https://mobilestudio-androidide.github.io/MobileStudio-AndroidPython/simple/",
+                    "--cert", "/data/local/tmp/python-android/lib/python3.13/site-packages/certifi/cacert.pem",
+                    packageName
+                )
+                pb.directory(File("/data/local/tmp/python-android"))
+                pb.redirectErrorStream(true)
+                val p = pb.start()
+                val output = p.inputStream.bufferedReader().readText()
+                p.waitFor(5, TimeUnit.MINUTES)
+
+                mainHandler.post {
+                    callback(p.exitValue() == 0, output)
+                }
+            } catch (e: Exception) {
+                mainHandler.post { callback(false, e.message ?: "알 수 없는 오류") }
+            }
+        }
     }
 
     /**

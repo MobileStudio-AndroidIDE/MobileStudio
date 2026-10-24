@@ -219,6 +219,15 @@ class CodeBrainActivity : AppCompatActivity() {
         }
         bottomBar.addView(btnClear)
 
+        val btnPython = makeBottomButton("Python 환경") {
+            if (service.ensurePython313()) {
+                Toast.makeText(this@CodeBrainActivity, "Python 3.13 준비 완료", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@CodeBrainActivity, service.lastError ?: "Python 3.13 없음", Toast.LENGTH_LONG).show()
+            }
+        }
+        bottomBar.addView(btnPython)
+
         root.addView(bottomBar)
 
         setContentView(root)
