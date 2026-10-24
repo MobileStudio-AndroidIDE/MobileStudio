@@ -102,9 +102,9 @@ class MobileGodotEditorActivity : GodotEditor() {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 dp(40),
-                Gravity.TOP or Gravity.END
+                Gravity.BOTTOM or Gravity.END
             ).apply {
-                topMargin = dp(8)
+                bottomMargin = dp(12)
                 rightMargin = dp(8)
             }
         }
