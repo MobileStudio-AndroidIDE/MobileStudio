@@ -250,26 +250,56 @@ class CodeBrainService(private val context: Context) {
     }
 
     /**
+     * 채팅 응답 결과
+     */
+    data class ChatResult(
+        val output: String?,
+        val error: String?,
+        val needsClarification: Boolean = false,
+        val missing: List<String> = emptyList(),
+        val intent: String? = null,
+        val slots: Map<String, Any> = emptyMap(),
+    )
+
+    /**
      * 자연어 채팅 (코드 생성, 설명, 질문 등).
      */
-    fun chat(text: String, callback: (result: String?, error: String?) -> Unit) {
+    fun chat(text: String, callback: (result: ChatResult) -> Unit) {
         executor.execute {
             val response = sendRequest("chat", mapOf("text" to text), timeoutMs = 30000)
             if (response == null) {
-                mainHandler.post { callback(null, "응답 없음 (타임아웃)") }
+                mainHandler.post { callback(ChatResult(null, "응답 없음 (타임아웃)")) }
                 return@execute
             }
             try {
                 val json = org.json.JSONObject(response)
                 if (json.optBoolean("ok", false)) {
                     val result = json.optJSONObject("result")
+                    val needsClarification = result.optBoolean("needs_clarification", false)
+                    val missing = if (needsClarification) {
+                        val arr = result.optJSONArray("missing")
+                        if (arr != null) {
+                            (0 until arr.length()).map { arr.getString(it) }.toList()
+                        } else emptyList()
+                    } else emptyList()
+                    val intent = if (needsClarification) result.optString("intent", null) else null
+                    val slots = if (needsClarification) result.optJSONObject("slots") else null
+                    val slotsMap = if (slots != null) {
+                        val keys = slots.keys()
+                        mutableMapOf<String, Any>().apply {
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                put(key, slots.get(key))
+                            }
+                        }
+                    } else emptyMap()
                     val output = result?.optString("output") ?: result?.toString() ?: response
-                    mainHandler.post { callback(output, null) }
+                    mainHandler.post { callback(ChatResult(output, null, needsClarification, missing, intent, slotsMap)) }
                 } else {
-                    mainHandler.post { callback(null, json.optString("error", "알 수 없는 오류")) }
+                    mainHandler.post { callback(ChatResult(null, json.optString("error", "알 수 없는 오류"))) }
                 }
             } catch (e: Exception) {
-                mainHandler.post { callback(null, e.message) }
+                mainHandler.post { callback(ChatResult(null, e.message)) }
             }
         }
     }

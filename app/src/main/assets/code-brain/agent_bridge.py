@@ -29,6 +29,8 @@ import sys
 import traceback
 from typing import Any, Optional
 
+from cognition.nlu import understand
+
 PROTOCOL_VERSION = "1.0"
 
 
@@ -310,7 +312,43 @@ class AgentBridge:
             elif method == "manifest":
                 result = self.manifest()
             elif method == "chat":
-                result = self.agent.respond_json(str(params.get("text", "")))
+                text = str(params.get("text", ""))
+                nlu = understand(text)
+
+                # 누락된 필수 정보가 있으면 사용자에게 되묻기 (Clarification)
+                if nlu["missing"]:
+                    missing_msg = {
+                        "language": "어떤 프로그래밍 언어로 만들까요? (예: 파이썬, 코틀린, 자바)"
+                    }
+                    questions = [missing_msg.get(m, f"{m} 정보가 필요합니다.") for m in nlu["missing"]]
+                    result = {
+                        "ok": True,
+                        "output": f"죄송해요, 정보를 더 알아야 해요.\n\n"
+                                  + "\n".join(f"• {q}" for q in questions),
+                        "needs_clarification": True,
+                        "missing": nlu["missing"],
+                        "intent": nlu["intent"],
+                        "slots": nlu["slots"],
+                    }
+                else:
+                    # 의도에 따라 툴 호출
+                    if nlu["intent"] == "code.generate":
+                        result = self.call("code.generate", {
+                            "prompt": nlu["normalized"],
+                            "language": nlu["slots"].get("language", "python")
+                        })
+                    elif nlu["intent"] == "code.explain":
+                        result = {
+                            "ok": True,
+                            "output": f"코드 설명 기능은 준비 중입니다. 코드를 붙여넣어 주세요.\n입력: {text}"
+                        }
+                    elif nlu["intent"] == "code.verify":
+                        result = {
+                            "ok": True,
+                            "output": f"코드 검증 기능은 준비 중입니다. 코드를 붙여넣어 주세요.\n입력: {text}"
+                        }
+                    else:
+                        result = {"ok": True, "output": "무슨 도움을 드릴까요? 코드를 만들어 달라고 말씀해 주세요."}
             elif method == "tool":
                 result = self.call(str(params.get("name", "")),
                                    params.get("args") or {})

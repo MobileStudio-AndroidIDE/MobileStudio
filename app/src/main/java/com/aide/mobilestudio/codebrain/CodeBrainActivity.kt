@@ -44,6 +44,9 @@ class CodeBrainActivity : AppCompatActivity() {
     private val initializing = AtomicBoolean(false)
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
+    /** clarification(되묻기) 대기 중인 상태 */
+    private var pendingClarification: CodeBrainService.ChatResult? = null
+
     companion object {
         fun start(context: Context) {
             context.startActivity(Intent(context, CodeBrainActivity::class.java))
@@ -253,20 +256,37 @@ class CodeBrainActivity : AppCompatActivity() {
         val text = input.text.toString().trim()
         if (text.isEmpty() || initializing.get()) return
 
+        // clarification 대기 중이면 기존 입력과 병합
+        val finalText = if (pendingClarification != null) {
+            val prev = pendingClarification?.slots?.get("original_text")?.toString() ?: ""
+            pendingClarification = null
+            if (prev.isNotEmpty()) "$prev $text" else text
+        } else {
+            text
+        }
+
         input.setText("")
         sendButton.isEnabled = false
 
-        addUserMessage(text)
+        addUserMessage(finalText)
 
         statusText.text = "처리 중..."
-        service.chat(text) { result, error ->
+        service.chat(finalText) { result ->
             mainHandler.post {
-                if (error != null) {
-                    addBotMessage("오류: $error")
+                if (result.error != null) {
+                    addBotMessage("오류: ${result.error}")
                     statusText.text = "오류 발생"
                     statusText.setTextColor(Color.parseColor("#F85149"))
+                } else if (result.needsClarification) {
+                    // clarification 필요: 사용자에게 추가 입력 요청
+                    pendingClarification = result.copy(
+                        slots = result.slots + ("original_text" to finalText)
+                    )
+                    showClarificationDialog(result.output ?: "추가 정보가 필요합니다.", result.missing)
+                    statusText.text = "추가 정보 필요"
+                    statusText.setTextColor(Color.parseColor("#58A6FF"))
                 } else {
-                    addBotMessage(result ?: "응답 없음")
+                    addBotMessage(result.output ?: "응답 없음")
                     statusText.text = "준비 완료"
                     statusText.setTextColor(Color.parseColor("#3FB950"))
                 }
@@ -337,6 +357,38 @@ class CodeBrainActivity : AppCompatActivity() {
             setMessage(message)
             setPositiveButton("확인") { _, _ -> }
             setCancelable(true)
+        }.create().show()
+    }
+
+    /** clarification(되묻기) 다이얼로그 표시 */
+    private fun showClarificationDialog(message: String, missing: List<String>) {
+        val dialogInput = EditText(this).apply {
+            hint = missing.joinToString(", ") + " 정보를 입력하세요."
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#8B949E"))
+            setPadding(16, 14, 16, 14)
+            maxLines = 3
+            isVerticalScrollBarEnabled = true
+        }
+
+        AlertDialog.Builder(this).apply {
+            setTitle("추가 정보 필요")
+            setMessage(message)
+            setView(dialogInput)
+            setPositiveButton("전송") { _, _ ->
+                val extraText = dialogInput.text.toString().trim()
+                if (extraText.isNotEmpty()) {
+                    input.setText(extraText)
+                    onSend()
+                }
+            }
+            setNegativeButton("취소") { _, _ ->
+                pendingClarification = null
+                statusText.text = "준비 완료"
+                statusText.setTextColor(Color.parseColor("#3FB950"))
+            }
+            setCancelable(false)
         }.create().show()
     }
 
