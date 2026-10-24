@@ -5153,6 +5153,10 @@ def run():
 
             renderer/rendering_method="gl_compatibility"
             renderer/rendering_method.mobile="gl_compatibility"
+
+            [input]
+
+            touch_emulation_enabled=true
             """.trimIndent() + "\n"
         )
         File(root, "main.tscn").writeText(
@@ -5162,6 +5166,30 @@ def run():
             [ext_resource type="Script" path="res://main.gd" id="1_main"]
 
             [node name="Main" type="Node2D"]
+
+            [node name="Paddle" type="ColorRect" parent="."]
+            position = Vector2(0, 0)
+            size = Vector2(160, 30)
+            color = Color(0.2, 0.7, 1.0, 1.0)
+
+            [node name="Ball" type="ColorRect" parent="."]
+            position = Vector2(0, -100)
+            size = Vector2(24, 24)
+            color = Color(1.0, 0.4, 0.4, 1.0)
+
+            [node name="ScoreLabel" type="Label" parent="."]
+            position = Vector2(20, 20)
+            text = "Score: 0"
+            custom_colors/font_color = Color(1, 1, 1, 1)
+            size_flags_vertical = 1
+
+            [node name="StatusLabel" type="Label" parent="."]
+            position = Vector2(0, 60)
+            text = ""
+            align = 2
+            custom_colors/font_color = Color(1, 1, 0, 1)
+            size_flags_vertical = 1
+
             script = ExtResource("1_main")
             """.trimIndent() + "\n"
         )
@@ -5169,11 +5197,77 @@ def run():
             """
             extends Node2D
 
+            @onready var paddle = get_node("Paddle")
+            @onready var ball = get_node("Ball")
+            @onready var score_label = get_node("ScoreLabel")
+            @onready var status_label = get_node("StatusLabel")
+
+            var ball_velocity = Vector2(260, -300)
+            var paddle_speed = 560
+            var score = 0
+            var game_over = false
+
             func _ready() -> void:
-                var label := Label.new()
-                label.text = "Hello from Godot!"
-                label.position = Vector2(80, 80)
-                add_child(label)
+                randomize()
+                ball.position = Vector2(get_viewport_rect().size.x / 2, -100)
+                ball_velocity = Vector2(randf_range(-180, 180), -300)
+                _update_score()
+
+            func _process(delta: float) -> void:
+                if game_over:
+                    return
+
+                # --- Paddle follows touch / mouse ---
+                var target_x = get_viewport().get_mouse_position().x
+                target_x = clamp(target_x, paddle.size.x / 2, get_viewport_rect().size.x - paddle.size.x / 2)
+                paddle.position.x = lerp(paddle.position.x, target_x, paddle_speed * delta / 120)
+
+                # --- Ball movement ---
+                ball.position += ball_velocity * delta
+                var viewport_size = get_viewport_rect().size
+
+                # Bounce off walls
+                if ball.position.x < ball.size.x / 2 or ball.position.x > viewport_size.x - ball.size.x / 2:
+                    ball_velocity.x = -ball_velocity.x
+                    ball.position.x = clamp(ball.position.x, ball.size.x / 2, viewport_size.x - ball.size.x / 2)
+
+                if ball.position.y < ball.size.y / 2:
+                    ball_velocity.y = -ball_velocity.y
+                    ball.position.y = ball.size.y / 2
+
+                # Bounce off paddle
+                if ball.position.y > paddle.position.y - paddle.size.y / 2 - ball.size.y / 2 and \
+                   ball.position.y < paddle.position.y + paddle.size.y / 2 and \
+                   ball.position.x > paddle.position.x - paddle.size.x / 2 - ball.size.x / 2 and \
+                   ball.position.x < paddle.position.x + paddle.size.x / 2 + ball.size.x / 2 and \
+                   ball_velocity.y > 0:
+                    ball_velocity.y = -abs(ball_velocity.y)
+                    # Add some sideways bounce based on where ball hit paddle
+                    var hit_offset = (ball.position.x - paddle.position.x) / (paddle.size.x / 2)
+                    ball_velocity.x = hit_offset * 220
+                    score += 1
+                    _update_score()
+
+                # Missed the ball -> game over
+                if ball.position.y > viewport_size.y + ball.size.y:
+                    game_over = true
+                    status_label.text = "Game Over! Tap to restart."
+                    status_label.position = Vector2(viewport_size.x / 2 - 120, viewport_size.y / 2 - 20)
+
+            func _input(event: InputEvent) -> void:
+                if game_over and event is InputEventScreenTouch and event.pressed:
+                    _restart_game()
+
+            func _update_score() -> void:
+                score_label.text = "Score: %d" % [score]
+
+            func _restart_game() -> void:
+                game_over = false
+                score = 0
+                status_label.text = ""
+                ball.position = Vector2(get_viewport_rect().size.x / 2, -100)
+                ball_velocity = Vector2(randf_range(-180, 180), -300)
+                _update_score()
             """.trimIndent() + "\n"
         )
         File(root, ".gitignore").writeText(

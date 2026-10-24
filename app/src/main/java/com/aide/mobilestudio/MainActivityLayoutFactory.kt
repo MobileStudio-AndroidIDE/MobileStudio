@@ -244,9 +244,12 @@ private fun Context.buildMainSurface(): View {
     val isLandscape = isLandscapeScreen()
     val isTablet = resources.displayMetrics.widthPixels >= 600 * resources.displayMetrics.density
     
-    // Phase 6.1: Horizontal mode 3-pane layout (file tree | editor | bottom panel)
+    // Phase 6.1: Horizontal mode layouts
     if (isLandscape && isTablet) {
         return buildLandscapeMainSurface()
+    }
+    if (isLandscape && !isTablet) {
+        return buildPhoneLandscapeMainSurface()
     }
     
     return FrameLayout(this).apply {
@@ -453,6 +456,45 @@ private fun Context.buildLandscapeMainSurface(): View {
                 id = R.id.landscape_bottom_panel_container
             }
             addView(rightPane)
+        }
+        addView(root)
+    }
+}
+
+/**
+ * 전화기 가로모드 전용 UI.
+ * 세로모드와 동일하게 사이드 레일(좌측) + 콘텐츠(우측)로 구성하지만,
+ * 가로 폭을 모두 활용해 세로모드보다 넓게 편집 영역이 쓰이게 한다.
+ */
+private fun Context.buildPhoneLandscapeMainSurface(): View {
+    val ctx = this
+    return FrameLayout(ctx).apply {
+        val root = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+
+            // 좌측: 사이드 레일 (고정 폭)
+            addView(ctx.buildSideRail())
+
+            // 구분선
+            addView(View(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT)
+                setBackgroundColor(StudioUi.color("#3E4451"))
+            })
+
+            // 우측: 에디터 콘텐츠 (가변 폭, 나머지 전체 사용)
+            val content = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                background = StudioUi.gradient(ctx, "#0B0F15", "#12161F")
+                addView(ctx.buildChrome())
+                addView(ctx.buildProjectTabStrip())
+                addView(ctx.buildTabStrip())
+                addView(ctx.buildWorkspaceArea(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+                addView(ctx.buildStatusBar())
+            }
+            addView(content)
         }
         addView(root)
     }

@@ -69,7 +69,7 @@ class MobileStudioGodotBuildProvider(
         runner.run(
             projectDir = File(projectPath),
             tasks = listOf("clean"),
-            onLine = {},
+            onLine = { _, _ -> },
             onDone = {
                 runOnGodotThread { callback.call() }
             }

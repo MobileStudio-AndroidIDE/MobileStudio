@@ -95,12 +95,7 @@ class MobileGodotEditorActivity : GodotEditor() {
             background = barBackground()
             isClickable = true
         }
-        bottom.addView(tabButton("Scene") { focusDock("scene") })
-        bottom.addView(tabButton("Inspector") { focusDock("inspector") })
-        bottom.addView(tabButton("Files") { focusDock("files") })
-        bottom.addView(tabButton("Script") { selectMainScreen(2) })
-        bottom.addView(tabButton("2D") { selectMainScreen(0) })
-        bottom.addView(tabButton("3D") { selectMainScreen(1) })
+        bottom.addView(tabButton("⟨ 닫기") { finish() })
 
         val restore = actionButton("⛶") { toggleFullscreen() }.apply {
             visibility = View.GONE
@@ -157,9 +152,7 @@ class MobileGodotEditorActivity : GodotEditor() {
 
     private fun updateOverlayVisibility() {
         val root = overlayRoot ?: return
-        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        root.visibility = if (landscape) View.GONE else View.VISIBLE
-        if (landscape) return
+        root.visibility = View.VISIBLE
         topBar?.visibility = if (fullscreen) View.GONE else View.VISIBLE
         bottomBar?.visibility = if (fullscreen) View.GONE else View.VISIBLE
         restoreButton?.visibility = if (fullscreen) View.VISIBLE else View.GONE

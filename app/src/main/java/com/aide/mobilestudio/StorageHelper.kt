@@ -49,6 +49,8 @@ object StorageHelper {
         "settings.gradle", "settings.gradle.kts",
         "pom.xml", "CMakeLists.txt", "AndroidManifest.xml",
         "extension.json", "package.json", ".git", "src", "app",
+        // Godot project marker
+        "project.godot",
         // C/C++ / Windows .exe projects (root main.c + README.md)
         "main.c", "main.cpp", "main.cc",
         "Makefile", "meson.build",
