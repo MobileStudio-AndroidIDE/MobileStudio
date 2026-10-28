@@ -7,6 +7,8 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.text.Editable
+import android.text.TextWatcher
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -537,22 +539,86 @@ class HomeActivity : AppCompatActivity() {
                 text = "Editor"
                 textSize = 18f
                 setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 12)
             })
-            val editor = EditText(ctx).apply {
+            val editorContainer = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0
+                ).apply { weight = 1f }
+                setBackgroundColor(Color.parseColor("#0B0F15"))
+            }
+            val lineNumbers = TextView(ctx).apply {
+                text = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10"
+                textSize = 13f
+                setTextColor(Color.parseColor("#94A3B8"))
+                setPadding(8, 8, 8, 8)
+                setBackgroundColor(Color.parseColor("#161B22"))
+                setTypeface(android.graphics.Typeface.MONOSPACE)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                setGravity(android.view.Gravity.TOP)
+            }
+            editorContainer.addView(lineNumbers)
+            val codeText = EditText(ctx).apply {
                 hint = "fun main() {\n    println(\"Hello\")\n}"
                 textSize = 13f
                 setTextColor(Color.WHITE)
                 setPadding(8, 8, 8, 8)
                 setBackgroundColor(Color.parseColor("#0B0F15"))
+                setTypeface(android.graphics.Typeface.MONOSPACE)
                 layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    0
+                    0,
+                    ViewGroup.LayoutParams.MATCH_PARENT
                 ).apply { weight = 1f }
+                setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_NONE)
             }
-            c.addView(editor)
+            editorContainer.addView(codeText)
+            c.addView(editorContainer)
+            val statusBar = TextView(ctx).apply {
+                text = "No errors"
+                textSize = 11f
+                setTextColor(Color.parseColor("#3B82F6"))
+                setPadding(8, 4, 8, 4)
+                setBackgroundColor(Color.parseColor("#161B22"))
+            }
+            c.addView(statusBar)
+            codeText.addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) {
+                    highlightCode(s.toString(), codeText)
+                }
+                override fun afterTextChanged(s: Editable) {}
+            })
             return c
         }
+    }
+
+    private fun highlightCode(code: String, editText: EditText) {
+        val spannable = android.text.SpannableString(code)
+        val keywords = listOf("fun", "val", "var", "if", "else", "when", "for", "while", "return", "class", "object", "interface", "extension", "import", "package")
+        for (kw in keywords) {
+            val regex = java.util.regex.Pattern.compile("\\b$kw\\b")
+            val matcher = regex.matcher(code)
+            while (matcher.find()) {
+                spannable.setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#569CD6")), matcher.start(), matcher.end(), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        val strRegex = java.util.regex.Pattern.compile("\"[^\"]*\"")
+        val strMatcher = strRegex.matcher(code)
+        while (strMatcher.find()) {
+            spannable.setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#CE9178")), strMatcher.start(), strMatcher.end(), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val commentRegex = java.util.regex.Pattern.compile("//[^\n]*")
+        val commentMatcher = commentRegex.matcher(code)
+        while (commentMatcher.find()) {
+            spannable.setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#6A9955")), commentMatcher.start(), commentMatcher.end(), android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        editText.setText(spannable, android.widget.TextView.BufferType.SPANNABLE)
     }
 
     private fun ToolManagerScreen(ctx: Context): Screen = object : Screen(ctx) {
