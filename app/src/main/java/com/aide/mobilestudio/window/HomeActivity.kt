@@ -231,19 +231,58 @@ class HomeActivity : AppCompatActivity() {
                 ).apply { weight = 1f }
             }
             c.addView(output)
-            val input = EditText(ctx).apply {
-                hint = "Type a command..."
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                setPadding(12, 10, 12, 10)
-                setBackgroundResource(R.drawable.home_tile_bg)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
+            val input = EditText(ctx)
+            input.hint = "Type a command..."
+            input.textSize = 14f
+            input.setTextColor(Color.WHITE)
+            input.setPadding(12, 10, 12, 10)
+            input.setBackgroundResource(R.drawable.home_tile_bg)
+            input.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE)
+            input.setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                    val cmd = input.text.toString().trim()
+                    input.setText("")
+                    if (cmd.isNotEmpty()) {
+                        output.append("$ $cmd\n")
+                        execShellCmd(cmd, output)
+                    }
+                    true
+                } else {
+                    false
+                }
             }
             c.addView(input)
             return c
+        }
+    }
+
+    private fun execShellCmd(cmd: String, output: TextView) {
+        val ctx = this@HomeActivity
+        java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+            try {
+                val pb = if (cmd.equals("clear", ignoreCase = true)) {
+                    ProcessBuilder("sh", "-c", "clear")
+                } else {
+                    ProcessBuilder("sh", "-c", cmd)
+                }
+                pb.directory(ctx.filesDir)
+                pb.redirectErrorStream(true)
+                val p = pb.start()
+                val result = p.inputStream.bufferedReader().readText()
+                p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    output.append(result.ifEmpty { "(no output)" })
+                    output.append("\n")
+                }
+            } catch (e: Exception) {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    output.append("Error: ${e.message}\n")
+                }
+            }
         }
     }
 
@@ -299,6 +338,7 @@ class HomeActivity : AppCompatActivity() {
 
     private fun FileExplorerScreen(ctx: Context): Screen = object : Screen(ctx) {
         override val id: String = "files"
+        private var currentDir = ctx.filesDir
         override fun build(): View {
             val c = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
@@ -308,8 +348,16 @@ class HomeActivity : AppCompatActivity() {
                 text = "File Explorer"
                 textSize = 18f
                 setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 12)
             })
+            val pathBar = TextView(ctx).apply {
+                text = currentDir.absolutePath
+                textSize = 12f
+                setTextColor(Color.parseColor("#94A3B8"))
+                setPadding(0, 0, 0, 8)
+            }
+            c.addView(pathBar)
             val fileList = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(
@@ -318,13 +366,103 @@ class HomeActivity : AppCompatActivity() {
                 ).apply { weight = 1f }
             }
             c.addView(fileList)
-            c.addView(TextView(ctx).apply {
-                text = "Files will appear here."
-                textSize = 14f
-                setTextColor(Color.parseColor("#94A3B8"))
-                setPadding(8, 4, 8, 4)
-            })
+            val btnBack = Button(ctx).apply {
+                text = "Back"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#2E8549"))
+                setPadding(12, 6, 12, 6)
+            }
+            btnBack.setOnClickListener {
+                val parent = currentDir.parentFile
+                if (parent != null) {
+                    currentDir = parent
+                    pathBar.text = currentDir.absolutePath
+                    refreshList(ctx, fileList, pathBar)
+                }
+            }
+            c.addView(btnBack)
+            val btnRefresh = Button(ctx).apply {
+                text = "Refresh"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#2E8549"))
+                setPadding(12, 6, 12, 6)
+            }
+            btnRefresh.setOnClickListener {
+                refreshList(ctx, fileList, pathBar)
+            }
+            c.addView(btnRefresh)
+            refreshList(ctx, fileList, pathBar)
             return c
+        }
+
+        private fun refreshList(ctx: Context, container: LinearLayout, pathBar: TextView) {
+            container.removeAllViews()
+            val dir = currentDir
+            if (!dir.exists() || !dir.isDirectory) {
+                container.addView(TextView(ctx).apply {
+                    text = "Directory not found: $currentDir"
+                    textSize = 14f
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    setPadding(8, 4, 8, 4)
+                })
+                return
+            }
+            pathBar.text = dir.absolutePath
+            val files = dir.listFiles()
+            if (files == null || files.isEmpty()) {
+                container.addView(TextView(ctx).apply {
+                    text = "(empty)"
+                    textSize = 14f
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    setPadding(8, 4, 8, 4)
+                })
+                return
+            }
+            val sorted = files.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+            for (f in sorted) {
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(4, 4, 4, 4)
+                }
+                val icon = TextView(ctx).apply {
+                    text = if (f.isDirectory) "\uD83D\uDCC2" else "\uD83D\uDCC4"
+                    textSize = 16f
+                    setPadding(4, 0, 8, 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                }
+                row.addView(icon)
+                val name = TextView(ctx).apply {
+                    text = f.name
+                    textSize = 14f
+                    setTextColor(Color.WHITE)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { weight = 1f }
+                }
+                row.addView(name)
+                val size = TextView(ctx).apply {
+                    text = if (f.isDirectory) "" else "${f.length()} bytes"
+                    textSize = 12f
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    setPadding(0, 0, 8, 0)
+                }
+                row.addView(size)
+                row.setOnClickListener {
+                    if (f.isDirectory) {
+                        currentDir = f
+                        refreshList(ctx, container, pathBar)
+                    } else {
+                        android.widget.Toast.makeText(ctx, "Opened: ${f.name}", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+                container.addView(row)
+            }
         }
     }
 
