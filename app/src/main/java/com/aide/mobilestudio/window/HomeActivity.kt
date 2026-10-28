@@ -297,6 +297,7 @@ class HomeActivity : AppCompatActivity() {
                 text = "Web Browser"
                 textSize = 18f
                 setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 12)
             })
             val urlBar = EditText(ctx).apply {
@@ -305,17 +306,34 @@ class HomeActivity : AppCompatActivity() {
                 setTextColor(Color.WHITE)
                 setPadding(12, 10, 12, 10)
                 setBackgroundResource(R.drawable.home_tile_bg)
+                setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO)
             }
             c.addView(urlBar)
-            val webView = android.webkit.WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    0
-                ).apply { weight = 1f }
+            val navBar = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 8, 0, 8)
             }
-            c.addView(webView)
+            val btnBack = Button(ctx).apply {
+                text = "\u25C4 Back"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#374151"))
+                setPadding(12, 6, 12, 6)
+            }
+            val btnForward = Button(ctx).apply {
+                text = "Forward \u25BA"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#374151"))
+                setPadding(12, 6, 12, 6)
+            }
+            val btnReload = Button(ctx).apply {
+                text = "\u21BB Reload"
+                textSize = 12f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#374151"))
+                setPadding(12, 6, 12, 6)
+            }
             val btnGo = Button(ctx).apply {
                 text = "Go"
                 textSize = 12f
@@ -323,6 +341,32 @@ class HomeActivity : AppCompatActivity() {
                 setBackgroundColor(Color.parseColor("#2E8549"))
                 setPadding(12, 6, 12, 6)
             }
+            navBar.addView(btnBack)
+            navBar.addView(btnForward)
+            navBar.addView(btnReload)
+            navBar.addView(btnGo)
+            c.addView(navBar)
+            val webView = android.webkit.WebView(ctx).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.builtInZoomControls = true
+                settings.displayZoomControls = false
+                setWebViewClient(object : android.webkit.WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: android.webkit.WebView, url: String): Boolean {
+                        view.loadUrl(url)
+                        urlBar.setText(url)
+                        return true
+                    }
+                    override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                        urlBar.setText(url ?: "")
+                    }
+                })
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0
+                ).apply { weight = 1f }
+            }
+            c.addView(webView)
             btnGo.setOnClickListener {
                 val url = urlBar.text.toString().trim()
                 if (url.isNotEmpty()) {
@@ -330,7 +374,23 @@ class HomeActivity : AppCompatActivity() {
                     webView.loadUrl(finalUrl)
                 }
             }
-            c.addView(btnGo)
+            btnBack.setOnClickListener {
+                if (webView.canGoBack()) webView.goBack()
+            }
+            btnForward.setOnClickListener {
+                if (webView.canGoForward()) webView.goForward()
+            }
+            btnReload.setOnClickListener {
+                webView.reload()
+            }
+            urlBar.setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                    btnGo.performClick()
+                    true
+                } else {
+                    false
+                }
+            }
             webView.loadUrl("https://github.com/MobileStudio-AndroidIDE/MobileStudio")
             return c
         }
