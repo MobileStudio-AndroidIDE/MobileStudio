@@ -621,6 +621,7 @@ class HomeActivity : AppCompatActivity() {
         editText.setText(spannable, android.widget.TextView.BufferType.SPANNABLE)
     }
 
+
     private fun ToolManagerScreen(ctx: Context): Screen = object : Screen(ctx) {
         override val id: String = "tools"
         override fun build(): View {
@@ -632,14 +633,59 @@ class HomeActivity : AppCompatActivity() {
                 text = "Tool Manager"
                 textSize = 18f
                 setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 16)
             })
             c.addView(TextView(ctx).apply {
-                text = "JDK / NDK versions"
+                text = "JDK / NDK toolchains"
                 textSize = 14f
                 setTextColor(Color.parseColor("#94A3B8"))
                 setPadding(0, 0, 0, 8)
             })
+            val list = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    0
+                ).apply { weight = 1f }
+            }
+            c.addView(list)
+            val tools = listOf(
+                "JDK 17" to true,
+                "JDK 21" to false,
+                "NDK 29.0.14206865" to true,
+                "NDK 29.0.14033849" to false,
+                "NDK 28.2.13676358" to false,
+            )
+            for ((name, installed) in tools) {
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(4, 4, 4, 4)
+                }
+                row.addView(TextView(ctx).apply {
+                    text = name
+                    textSize = 14f
+                    setTextColor(Color.WHITE)
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { weight = 1f }
+                })
+                row.addView(TextView(ctx).apply {
+                    text = if (installed) "Installed" else "Not installed"
+                    textSize = 12f
+                    setTextColor(if (installed) Color.parseColor("#22C55E") else Color.parseColor("#94A3B8"))
+                })
+                val btn = Button(ctx).apply {
+                    text = if (installed) "Open" else "Download"
+                    textSize = 10f
+                    setTextColor(Color.WHITE)
+                    setBackgroundColor(Color.parseColor("#2E8549"))
+                    setPadding(8, 4, 8, 4)
+                }
+                row.addView(btn)
+                list.addView(row)
+            }
             return c
         }
     }
@@ -655,12 +701,56 @@ class HomeActivity : AppCompatActivity() {
                 text = "Downloader"
                 textSize = 18f
                 setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 16)
             })
             c.addView(TextView(ctx).apply {
-                text = "Downloads will appear here."
-                textSize = 14f
+                text = "Downloading: JDK 17"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                setPadding(0, 0, 0, 8)
+            })
+            c.addView(TextView(ctx).apply {
+                text = "Download Path: /data/data/com.aide.mobilestudio/files/toolchain/jdk/jdk-17"
+                textSize = 11f
                 setTextColor(Color.parseColor("#94A3B8"))
+                setPadding(0, 0, 0, 8)
+            })
+            c.addView(TextView(ctx).apply {
+                text = "File Name: jdk-17-android.tar.gz"
+                textSize = 11f
+                setTextColor(Color.parseColor("#94A3B8"))
+                setPadding(0, 0, 0, 16)
+            })
+            val progressBar = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    30
+                )
+                setBackgroundColor(Color.parseColor("#161B22"))
+            }
+            val progressFill = LinearLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ).apply { weight = 0.7f }
+                setBackgroundColor(Color.parseColor("#7C3AED"))
+            }
+            progressBar.addView(progressFill)
+            c.addView(progressBar)
+            c.addView(TextView(ctx).apply {
+                text = "156MB (76%)  0.8MB/s"
+                textSize = 12f
+                setTextColor(Color.parseColor("#94A3B8"))
+                setPadding(8, 4, 8, 4)
+            })
+            c.addView(Button(ctx).apply {
+                text = "Cancel"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#374151"))
+                setPadding(20, 10, 20, 10)
             })
             return c
         }
