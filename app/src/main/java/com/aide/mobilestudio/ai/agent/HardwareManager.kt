@@ -47,7 +47,9 @@ class HardwareManager(private val context: Context) {
     
     fun getOptimalThreadCount(): Int {
         val cores = Runtime.getRuntime().availableProcessors()
-        // Smart core affinity: Use performance cores only (typically 4 threads for mobile ARM big.LITTLE)
-        return if (cores > 4) 4 else cores
+        // Use performance-oriented thread count: mobile ARM big.LITTLE benefits
+        // from using more than 4 threads for llama.cpp inference (batch matmul
+        // scales across cores). Cap at 8 to avoid oversubscription on small cores.
+        return if (cores >= 8) 8 else if (cores >= 6) 6 else cores
     }
 }

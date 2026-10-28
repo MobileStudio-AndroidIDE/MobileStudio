@@ -428,11 +428,11 @@ Java_com_aide_mobilestudio_ai_api_LlamaRuntimeBridge_nativeLoadModel(
     // per prompt token: measured ~20 tok/s on device, which is minutes of
     // waiting for an ordinary prompt. 256 lets the backend evaluate a real
     // batch while keeping the compute buffers small enough for a phone.
-    ctx_params.n_batch = 64;
-    ctx_params.n_ubatch = 64;
+    ctx_params.n_batch = 256;
+    ctx_params.n_ubatch = 256;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
-    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
     ctx_params.cb_eval = nullptr;
     ctx_params.abort_callback = [](void*) -> bool {
         int64_t deadline = g_abort_deadline_ms.load(std::memory_order_relaxed);

@@ -948,13 +948,12 @@ class OcLocalLlamaProvider(private val model: ModelManager.ModelInfo) : AIProvid
         }
         trySend(AIProvider.StreamEvent.Done)
         close()
-        // Free the native session the moment this request's stream ends. The
-        // engine builds a fresh provider per call, and nothing else ever called
-        // unload(), so every request left a loaded model - over a gigabyte of
-        // native memory - behind: the app's memory only ever grew while the
-        // user chatted. The model is reloaded on the next call, which is what
-        // already happened anyway.
-        awaitClose { unload() }
+        // Keep the model loaded across requests: reloading a 1B+ GGUF on every
+        // request is the single biggest latency source. The provider instance
+        // is reused across turns, so keeping the model resident avoids a full
+        // reload + context rebuild per message. Explicit unload() is available
+        // when the user switches models or the engine is torn down.
+        awaitClose { /* model stays resident across turns */ }
     }
 
     private fun buildPrompt(history: JSONArray, tools: JSONArray?): String {
