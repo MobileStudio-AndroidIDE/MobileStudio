@@ -10,7 +10,6 @@ android {
 
     defaultConfig {
         minSdk = 26
-        targetSdk = 36
         manifestPlaceholders["godotLibraryVersion"] = "4.7.2.stable"
         missingDimensionStrategy("products", "editor")
     }
@@ -37,8 +36,8 @@ android {
 
     sourceSets {
         getByName("main") {
-            java.srcDirs("src/main/java")
-            res.srcDirs("src/main/res")
+            java.srcDirs("src/main/java", "../third_party/godot/android/lib/src/main/java")
+            res.srcDirs("src/main/res", "../third_party/godot/android/lib/src/main/res")
             jniLibs.srcDirs("../third_party/godot/native")
         }
     }

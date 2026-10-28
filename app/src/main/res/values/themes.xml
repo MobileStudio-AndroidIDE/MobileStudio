@@ -75,4 +75,14 @@
         <!-- Inner theme for embedded activities like AsterOS -->
         <!-- necessary items can be overridden here -->
     </style>
+
+    <!-- Godot editor / game themes referenced from AndroidManifest.xml -->
+    <style name="GodotEditorTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+    <style name="GodotGameTheme" parent="GodotEditorTheme">
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
+    <style name="GodotEditorSplashScreenTheme" parent="Theme.SplashScreen.IconBackground">
+        <item name="postSplashScreenTheme">@style/GodotEditorTheme</item>
+    </style>
+    <style name="GodotEmbeddedGameTheme" parent="@android:style/Theme.DeviceDefault.Panel" />
 </resources>

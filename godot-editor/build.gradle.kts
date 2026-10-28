@@ -10,7 +10,6 @@ android {
 
     defaultConfig {
         minSdk = 26
-        targetSdk = 36
         missingDimensionStrategy("products", "editor")
     }
 
@@ -35,8 +34,8 @@ android {
 
     sourceSets {
         getByName("main") {
-            java.srcDirs("src/main/java")
-            res.srcDirs("src/main/res")
+            java.srcDirs("src/main/java", "../third_party/godot/android/editor/src/main/java")
+            res.srcDirs("src/main/res", "../third_party/godot/android/editor/src/main/res")
             assets.srcDirs("src/main/assets")
         }
     }
