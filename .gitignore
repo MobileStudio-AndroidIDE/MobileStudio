@@ -67,3 +67,8 @@ local.properties
 /godot/.cache/
 /godot/.work/
 /third_party/godot/native/**/*.so
+
+# Godot build artifacts
+godot-lib/build/
+godot-editor/build/
+app/build/
